@@ -48,21 +48,18 @@ oralab ui --no-open
 oralab ui --port 8877
 ```
 
-The interface reads the active Docker context, Docker Engine CPU/memory
-capacity, Compose service, container health, effective limits, statistics and
-mounts. Resource edits update only these `.env` keys:
+The interface reads the Docker Engine API endpoint, CPU/memory capacity,
+Oracle container health, effective limits, statistics and mounts. Resource
+edits update only these `.env` keys:
 
 ```text
 ORACLE_CPUS=4
 ORACLE_MEMORY=6g
 ```
 
-The selected `compose.yaml` must use those variables for the Oracle service's
-CPU and memory limits. OraLab verifies the values reported by `docker inspect`
-after application and reports a mismatch rather than claiming success.
-
-Applying changes to a running Oracle container requires explicit restart
-confirmation. No UI action deletes volumes, changes credentials, modifies
+OraLab sends these limits through Docker's live container-update API and reads
+the typed inspection response afterward. It reports a mismatch rather than
+claiming success. No UI action deletes volumes, changes credentials, modifies
 Oracle SGA/PGA parameters, controls global Docker Desktop/WSL resources, or
 executes SQL and shell commands.
 
@@ -94,30 +91,35 @@ oralab exec -- expdp help=y
 oralab exec -- impdp help=y
 ```
 
-The exit status from Docker Compose or the native command is returned to the
-calling terminal.
+The native command's container exit status is returned to the calling terminal.
 
 ## Safety behavior
 
 - `oralab setup` creates `.env` with restrictive permissions where supported
   and refuses to overwrite an existing file.
-- `oralab doctor` validates Compose with `docker compose config --quiet`, so
-  interpolated configuration and passwords are not printed.
-- `oralab up` waits for the Compose healthcheck rather than sleeping for an
-  arbitrary period.
-- `oralab ui` listens on IPv4 loopback only, rejects non-local Docker contexts
+- `oralab doctor` checks the Docker Engine API and validates local settings
+  without printing the database password.
+- `oralab up` creates the named volume and container through the Engine API,
+  then waits for the image healthcheck rather than sleeping arbitrarily.
+- `oralab ui` listens on IPv4 loopback only, rejects non-local Docker endpoints
   for mutations, validates host/origin headers and protects changes with a
   session-bound request token.
 - Stops and restarts allow Oracle up to 600 seconds to shut down by default.
 - OraLab deliberately has no reset, destroy, prune or volume-deletion command.
 
-OraLab requires a completed `compose.yaml` with a service named `oracle`. Until
-that environment is implemented and verified, lifecycle commands fail clearly
-instead of substituting an unverified image or configuration.
+OraLab does not require the Docker CLI or Docker Compose. It requires a
+validated `ORACLE_IMAGE`, password, CPU limit and memory limit before it can
+create `oralab-oracle`. Image selection is still pending, so the repository
+does not claim that an arbitrary Oracle image is supported.
+
+For a private registry pull, set `ORALAB_REGISTRY_USERNAME`,
+`ORALAB_REGISTRY_TOKEN` and optionally `ORALAB_REGISTRY_SERVER` in the
+launching process environment. OraLab sends them only in the Engine API pull
+request and never copies them into the project `.env`.
 
 ## Building
 
-Contributors with Go 1.22 or newer can run:
+Contributors with Go 1.24 or newer can run:
 
 ```text
 go test ./...

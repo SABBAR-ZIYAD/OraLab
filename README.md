@@ -7,14 +7,14 @@ OraLab gives Windows, Linux, and macOS users the same small set of commands for 
 An optional browser interface at `127.0.0.1` shows local Docker and Oracle status and lets you control the lab's CPU and memory limits. It is a resource companion, not a web-based database administration tool.
 
 > [!IMPORTANT]
-> The OraLab CLI and local Resource Manager are implemented. The repository does **not yet include the Oracle `compose.yaml` or a selected and validated Oracle 19c image**, so database lifecycle commands currently stop with a clear “environment has not been implemented yet” message. See [Project status](#project-status) and [PROJECT_PLAN.md](PROJECT_PLAN.md).
+> The OraLab CLI, direct Docker Engine integration, and local Resource Manager are implemented. The repository does **not yet select and validate an exact Oracle 19c image**, so users must not treat the empty `ORACLE_IMAGE` placeholder as a supported database configuration. See [Project status](#project-status) and [PROJECT_PLAN.md](PROJECT_PLAN.md).
 
 ## What this repository provides
 
 - One `oralab` command with the same interface on Windows, Linux, and macOS.
 - Safe project setup from `.env.example` without overwriting an existing `.env`.
 - Docker and project health checks with `oralab doctor`.
-- Oracle container lifecycle commands built on Docker Compose.
+- Oracle container lifecycle commands implemented with the Docker Engine Go API.
 - An interactive container shell and unchanged native Oracle command passthrough.
 - A dependency-free, localhost-only CPU/RAM Resource Manager embedded in the executable.
 - Standalone release builds for Windows AMD64, Linux AMD64/ARM64, and macOS Intel/Apple Silicon.
@@ -27,7 +27,7 @@ OraLab deliberately does not provide a SQL editor, web terminal, DBA dashboard, 
 End users need:
 
 - A supported 64-bit Windows, Linux, or macOS system.
-- Docker Desktop or Docker Engine with Docker Compose v2.
+- Docker Desktop or Docker Engine. The Docker CLI and Docker Compose are not required by OraLab.
 - Enough local memory and disk space for the Oracle image and database files.
 - Access to the Oracle 19c image selected by the project once that phase is complete, including any required registry sign-in or license acceptance.
 
@@ -82,7 +82,7 @@ oralab setup
 # Windows: notepad .env
 # Linux/macOS: use your preferred text editor
 
-# Start Oracle and wait for its Compose healthcheck
+# Create/start Oracle and wait for its image healthcheck
 oralab up
 
 # Inspect the service
@@ -109,7 +109,7 @@ oralab up --timeout 2400
 ```
 
 > [!NOTE]
-> The quick-start database steps describe the intended completed workflow. They require the pending `compose.yaml` and validated Oracle image.
+> The quick-start database steps require an exact validated Oracle image in `ORACLE_IMAGE`. Image selection and real Oracle runtime validation are still pending.
 
 ## Command reference
 
@@ -121,12 +121,12 @@ oralab [--project-dir PATH] <command>
 
 | Command | Purpose |
 | --- | --- |
-| `oralab doctor` | Check the Docker CLI, Compose v2, project files, `.env`, and Compose configuration. |
+| `oralab doctor` | Check the Docker Engine API endpoint and local `.env` configuration. |
 | `oralab setup` | Create `.env` from `.env.example`; refuse to overwrite an existing file. |
 | `oralab ui` | Start the local Resource Manager and open it in the default browser. |
-| `oralab up [--timeout SECONDS]` | Create/start Oracle and wait for its Compose healthcheck; default timeout is 1,800 seconds. |
-| `oralab status` | Show the Oracle Compose service status. |
-| `oralab logs [COMPOSE LOG OPTIONS]` | Follow Oracle logs and pass supported log options to Docker Compose. |
+| `oralab up [--timeout SECONDS]` | Create/start Oracle through the Engine API and wait for its image healthcheck; default timeout is 1,800 seconds. |
+| `oralab status` | Show Docker Engine and Oracle container status. |
+| `oralab logs [OPTIONS]` | Follow Oracle logs; supports `--no-follow`, `--tail`, `--since`, and `--timestamps`. |
 | `oralab shell` | Open an interactive Bash shell in the Oracle container. |
 | `oralab exec -- COMMAND [ARGS...]` | Run a native command in the Oracle container with its arguments unchanged. |
 | `oralab start` | Start an existing stopped Oracle container. |
@@ -193,7 +193,7 @@ oralab exec -- expdp help=y
 oralab exec -- impdp help=y
 ```
 
-OraLab returns the exit status from Docker Compose or the native command to the calling terminal.
+OraLab returns the native command's container exit status to the calling terminal.
 
 ## Local Resource Manager
 
@@ -218,7 +218,7 @@ oralab ui --port 8877
 The page displays:
 
 - Host operating system and architecture.
-- Docker availability, context, engine capacity, and endpoint type.
+- Docker availability, Engine API endpoint, capacity, and version.
 - Oracle container state and database readiness.
 - Configured and effective CPU/RAM limits.
 - Live CPU and memory usage.
@@ -228,7 +228,7 @@ The page can:
 
 - Save whole-number CPU and GiB memory limits.
 - Start, stop, or restart the Oracle service.
-- Recreate a running container only after explicit restart confirmation.
+- Apply CPU and memory limits live through Docker's container-update API.
 - Verify Docker's effective limits after applying a change.
 
 The Resource Manager changes only these values in `.env`:
@@ -238,9 +238,9 @@ ORACLE_CPUS=4
 ORACLE_MEMORY=6g
 ```
 
-Other settings—including `ORACLE_IMAGE`, `ORACLE_PWD`, and unrelated variables—are preserved. The future `compose.yaml` must consume `ORACLE_CPUS` and `ORACLE_MEMORY` for the limits to take effect.
+Other settings—including `ORACLE_IMAGE`, `ORACLE_PWD`, `ORACLE_SHM_SIZE`, and unrelated variables—are preserved. OraLab sends the limits directly to Docker and verifies the effective container values.
 
-The UI cannot run SQL or shell commands, modify SGA/PGA settings, change global Docker Desktop or WSL limits, alter credentials, delete volumes, or listen for remote users. It binds to IPv4 loopback only and rejects mutation requests from unrelated browser origins or remote Docker contexts.
+The UI cannot run SQL or shell commands, modify SGA/PGA settings, change global Docker Desktop or WSL limits, alter credentials, delete volumes, or listen for remote users. It binds to IPv4 loopback only and rejects mutation requests from unrelated browser origins or remote Docker endpoints.
 
 ## Configuration
 
@@ -254,8 +254,34 @@ Current settings are:
 | `ORACLE_PWD` | Local database password expected by the selected image. Treat it as a secret. |
 | `ORACLE_CPUS` | Whole-number CPU limit managed by the Resource Manager. |
 | `ORACLE_MEMORY` | Memory limit in GiB, stored with a `g` suffix and managed by the Resource Manager. |
+| `ORACLE_SHM_SIZE` | Container shared-memory size; defaults to `1g` when empty. |
 
 `.env` is excluded from Git. Never commit passwords, registry tokens, or other local secrets.
+
+### Private registry authentication
+
+If the selected Oracle image is not already local and its registry requires
+authentication, provide credentials only in the launching terminal's process
+environment:
+
+```sh
+export ORALAB_REGISTRY_USERNAME='your-account'
+export ORALAB_REGISTRY_TOKEN='temporary-token-or-password'
+export ORALAB_REGISTRY_SERVER='container-registry.oracle.com'
+oralab up
+```
+
+```powershell
+$env:ORALAB_REGISTRY_USERNAME = 'your-account'
+$env:ORALAB_REGISTRY_TOKEN = 'temporary-token-or-password'
+$env:ORALAB_REGISTRY_SERVER = 'container-registry.oracle.com'
+oralab up
+```
+
+OraLab encodes these values into the Engine API image-pull request and does not
+write them to `.env`. Clear the process variables afterward. Exact Oracle
+registry credentials and terms still depend on the image selected during the
+pending compatibility phase.
 
 ## Common workflows
 
@@ -265,7 +291,7 @@ Follow logs until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>:
 oralab logs
 ```
 
-Pass Docker Compose log options when useful:
+Filter Engine API log output when useful:
 
 ```sh
 oralab logs --tail 200
@@ -302,13 +328,13 @@ Run the command inside this repository, in one of its subdirectories, or specify
 oralab --project-dir /path/to/oracle19c doctor
 ```
 
-### “compose.yaml does not exist”
+### “ORACLE_IMAGE is empty”
 
-This is expected in the current implementation phase. The CLI and UI are present, but the validated Oracle environment is not yet committed.
+The direct Engine API runtime is ready, but the repository has not yet selected and validated the exact Oracle 19c image. Configure only an image whose source, license, architecture, variables, healthcheck, and persistent paths have been verified.
 
 ### Docker is unavailable
 
-Start Docker Desktop or the Docker Engine, confirm `docker --version` and `docker compose version` work in the same terminal, then run:
+Start Docker Desktop or Docker Engine, then run:
 
 ```sh
 oralab doctor
@@ -320,11 +346,11 @@ OraLab refuses to overwrite it to protect passwords and local settings. Edit the
 
 ### The UI refuses resource changes
 
-Resource mutations require a local Docker context and values within the CPU/memory capacity reported by Docker. If Docker Desktop's virtual machine has less capacity than the physical host, OraLab uses the Docker-reported capacity.
+Resource mutations require a local Docker Engine endpoint and values within the CPU/memory capacity reported by Docker. If Docker Desktop's virtual machine has less capacity than the physical host, OraLab uses the Docker-reported capacity.
 
 ## Build and test from source
 
-Install Go 1.22 or newer, then run:
+Install Go 1.24 or newer, then run:
 
 ```sh
 go test ./...
@@ -346,7 +372,7 @@ Implemented and tested:
 
 - Cross-platform OraLab command routing.
 - Safe `.env` creation.
-- Docker/Compose diagnostics.
+- Typed Docker Engine API diagnostics and lifecycle operations.
 - Native command passthrough behavior.
 - Embedded localhost Resource Manager and its request protections.
 - Resource-file preservation and Docker state parsing.
@@ -355,8 +381,8 @@ Implemented and tested:
 Still required before the repository is a complete Oracle 19c lab:
 
 - Select a redistributable or officially obtainable Oracle 19c image and document its license/access requirements.
-- Add the single-service `compose.yaml`.
-- Define and verify the Oracle healthcheck, localhost listener binding, and persistent volumes.
+- Validate the direct container specification against the selected Oracle image.
+- Verify the inherited Oracle healthcheck, localhost listener binding, shared memory, and persistent volume path.
 - Validate initialization, restart, persistence, SQL*Plus, RMAN, listener, Data Pump, and recovery behavior against the exact image.
 - Complete real runtime testing on every supported host platform.
 
@@ -368,8 +394,8 @@ OraLab is intended for a local lab, not production database hosting. Its design 
 
 - The Oracle listener is planned to bind to localhost by default.
 - The browser UI binds only to `127.0.0.1`.
-- Docker Compose configuration is validated without printing interpolated secrets.
-- Running resource changes require explicit restart confirmation.
+- Docker operations use the supported Moby client modules with automatic API negotiation.
+- CPU/RAM changes use Docker's live container-update endpoint and are verified afterward.
 - No endpoint exposes SQL, a terminal, arbitrary host commands, or volume deletion.
 - Oracle administration remains in Oracle's native terminal tools.
 

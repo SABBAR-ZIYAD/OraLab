@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -18,33 +18,19 @@ import (
 )
 
 const (
-	cpuSettingKey    = "ORACLE_CPUS"
-	memorySettingKey = "ORACLE_MEMORY"
-	operationTimeout = 31 * time.Minute
-	stateTimeout     = 12 * time.Second
+	cpuSettingKey       = "ORACLE_CPUS"
+	memorySettingKey    = "ORACLE_MEMORY"
+	shmSettingKey       = "ORACLE_SHM_SIZE"
+	imageSettingKey     = "ORACLE_IMAGE"
+	passwordSettingKey  = "ORACLE_PWD"
+	managedLabel        = "dev.oralab.managed"
+	oracleContainerName = "oralab-oracle"
+	oracleVolumeName    = "oralab-oradata"
+	oracleDataPath      = "/opt/oracle/oradata"
+	oracleListenerPort  = "1521"
+	operationTimeout    = 31 * time.Minute
+	stateTimeout        = 12 * time.Second
 )
-
-type dockerCommandRunner interface {
-	LookPath(file string) (string, error)
-	Output(ctx context.Context, name string, args ...string) ([]byte, error)
-}
-
-type systemDockerRunner struct{}
-
-func (systemDockerRunner) LookPath(file string) (string, error) {
-	return exec.LookPath(file)
-}
-
-func (systemDockerRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, name, args...)
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	output, err := command.Output()
-	if err != nil && stderr.Len() > 0 {
-		output = append(output, stderr.Bytes()...)
-	}
-	return output, err
-}
 
 type hostState struct {
 	OS           string `json:"os"`
@@ -52,7 +38,7 @@ type hostState struct {
 }
 
 type dockerState struct {
-	CLIAvailable bool   `json:"cli_available"`
+	APIAvailable bool   `json:"api_available"`
 	Reachable    bool   `json:"reachable"`
 	LocalContext bool   `json:"local_context"`
 	Context      string `json:"context,omitempty"`
@@ -104,156 +90,103 @@ type managerState struct {
 }
 
 type applyRequest struct {
-	CPUs           int  `json:"cpus"`
-	MemoryGiB      int  `json:"memory_gib"`
-	ConfirmRestart bool `json:"confirm_restart"`
+	CPUs      int `json:"cpus"`
+	MemoryGiB int `json:"memory_gib"`
 }
 
 type operationResult struct {
-	OK              bool         `json:"ok"`
-	Saved           bool         `json:"saved,omitempty"`
-	Applied         bool         `json:"applied,omitempty"`
-	RequiresRestart bool         `json:"requires_restart,omitempty"`
-	Message         string       `json:"message"`
-	State           managerState `json:"state"`
+	OK      bool         `json:"ok"`
+	Saved   bool         `json:"saved,omitempty"`
+	Applied bool         `json:"applied,omitempty"`
+	Message string       `json:"message"`
+	State   managerState `json:"state"`
 }
 
 type lifecycleRequest struct {
 	Action string `json:"action"`
 }
 
-type resourceManager struct {
-	root   string
-	runner dockerCommandRunner
-	opMu   sync.Mutex
+type labConfig struct {
+	Image       string
+	Password    string
+	CPUs        int
+	MemoryBytes int64
+	ShmBytes    int64
 }
 
-func newResourceManager(root string, runner dockerCommandRunner) *resourceManager {
-	return &resourceManager{root: root, runner: runner}
+type resourceManager struct {
+	root      string
+	engine    dockerEngine
+	engineErr error
+	opMu      sync.Mutex
+}
+
+func newResourceManager(root string, engine dockerEngine, engineErr error) *resourceManager {
+	return &resourceManager{root: root, engine: engine, engineErr: engineErr}
 }
 
 func (m *resourceManager) state(ctx context.Context) managerState {
 	state := managerState{
-		Host: hostState{
-			OS:           hostOSName(runtime.GOOS),
-			Architecture: runtime.GOARCH,
+		Host: hostState{OS: hostOSName(runtime.GOOS), Architecture: runtime.GOARCH},
+		Oracle: oracleState{
+			Service: oracleContainerName, Status: "unknown", Health: "unknown", Readiness: "unknown",
 		},
-		Oracle:    oracleState{Status: "unknown", Health: "unknown", Readiness: "unknown"},
 		CheckedAt: time.Now().UTC(),
 	}
-
 	configuredCPUs, configuredMemory, configErr := readResourceSettings(filepath.Join(m.root, environmentFile))
 	state.Resources.ConfiguredCPUs = configuredCPUs
 	state.Resources.ConfiguredMemoryBytes = configuredMemory
 	if configErr != nil && !errors.Is(configErr, os.ErrNotExist) {
 		state.Resources.Error = configErr.Error()
 	}
-
-	if _, err := m.runner.LookPath("docker"); err != nil {
-		state.Docker.Error = "Docker CLI is not installed or is not available in PATH."
-		state.Oracle.Error = "Oracle state requires Docker."
+	if m.engineErr != nil || m.engine == nil {
+		state.Docker.Error = friendlyEngineError("Docker Engine client is unavailable", m.engineErr)
+		state.Oracle.Error = "Oracle state requires the Docker Engine API."
 		return state
 	}
-	state.Docker.CLIAvailable = true
-
-	contextName, endpoint, err := m.dockerContext(ctx)
+	state.Docker.APIAvailable = true
+	state.Docker.Context = "Engine API"
+	state.Docker.Endpoint = m.engine.Endpoint()
+	state.Docker.LocalContext = isLocalDockerEndpoint(state.Docker.Endpoint)
+	info, err := m.engine.Info(ctx)
 	if err != nil {
-		state.Docker.Error = friendlyCommandError("Docker context is unavailable", err)
-		state.Oracle.Error = "Oracle state is unavailable until Docker is accessible."
-		return state
-	}
-	state.Docker.Context = contextName
-	state.Docker.Endpoint = endpoint
-	state.Docker.LocalContext = isLocalDockerEndpoint(endpoint)
-
-	infoOutput, err := m.runner.Output(ctx, "docker", "info", "--format", "{{json .}}")
-	if err != nil {
-		state.Docker.Error = friendlyCommandOutputError("Docker Engine is unavailable", infoOutput, err)
+		state.Docker.Error = friendlyEngineError("Docker Engine is unavailable", err)
 		state.Oracle.Error = "Oracle state is unavailable until Docker Engine is running."
-		return state
-	}
-	var info struct {
-		Name            string `json:"Name"`
-		OperatingSystem string `json:"OperatingSystem"`
-		ServerVersion   string `json:"ServerVersion"`
-		NCPU            int    `json:"NCPU"`
-		MemTotal        int64  `json:"MemTotal"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(infoOutput), &info); err != nil {
-		state.Docker.Error = "Docker returned an unreadable capability response."
 		return state
 	}
 	state.Docker.Reachable = true
 	state.Docker.EngineName = info.Name
 	state.Docker.EngineOS = info.OperatingSystem
 	state.Docker.Version = info.ServerVersion
-	state.Docker.CPUs = info.NCPU
-	state.Docker.MemoryBytes = info.MemTotal
+	state.Docker.CPUs = info.CPUs
+	state.Docker.MemoryBytes = info.MemoryBytes
 
-	service, err := m.discoverOracleService(ctx)
-	if err != nil {
-		state.Oracle.Error = err.Error()
-		if strings.Contains(err.Error(), composeFileName) {
-			state.Oracle.Status = "not-configured"
-		}
-		return state
-	}
-	state.Oracle.Service = service
-
-	containerOutput, err := m.composeOutput(ctx, "ps", "-q", service)
-	if err != nil {
-		state.Oracle.Error = friendlyCommandOutputError("Oracle container detection failed", containerOutput, err)
-		return state
-	}
-	containerID := strings.TrimSpace(string(containerOutput))
-	if containerID == "" {
+	inspected, err := m.engine.InspectContainer(ctx, oracleContainerName)
+	if errors.Is(err, errDockerObjectNotFound) {
 		state.Oracle.Status = "not-created"
 		state.Oracle.Health = "not-applicable"
 		state.Oracle.Readiness = "not-ready"
 		return state
 	}
-
-	state.Oracle.Exists = true
-	state.Oracle.ContainerID = shortContainerID(containerID)
-	inspectOutput, err := m.runner.Output(ctx, "docker", "inspect", containerID)
 	if err != nil {
-		state.Oracle.Error = friendlyCommandOutputError("Oracle container inspection failed", inspectOutput, err)
+		state.Oracle.Error = friendlyEngineError("Oracle container inspection failed", err)
 		return state
 	}
-	var inspected []struct {
-		State struct {
-			Status     string `json:"Status"`
-			Running    bool   `json:"Running"`
-			Restarting bool   `json:"Restarting"`
-			ExitCode   int    `json:"ExitCode"`
-			Health     *struct {
-				Status string `json:"Status"`
-			} `json:"Health"`
-		} `json:"State"`
-		HostConfig struct {
-			NanoCPUs int64 `json:"NanoCpus"`
-			Memory   int64 `json:"Memory"`
-		} `json:"HostConfig"`
-		Mounts []struct {
-			Type        string `json:"Type"`
-			Name        string `json:"Name"`
-			Source      string `json:"Source"`
-			Destination string `json:"Destination"`
-		} `json:"Mounts"`
-	}
-	if err := json.Unmarshal(inspectOutput, &inspected); err != nil || len(inspected) != 1 {
-		state.Oracle.Error = "Docker returned unreadable Oracle container details."
+	if !inspected.Managed {
+		state.Oracle.Status = "name-conflict"
+		state.Oracle.Error = "A container named oralab-oracle exists but is not managed by OraLab."
 		return state
 	}
-	container := inspected[0]
-	state.Oracle.Running = container.State.Running
-	state.Oracle.Status = container.State.Status
-	if container.State.Restarting {
+	state.Oracle.Exists = true
+	state.Oracle.ContainerID = shortContainerID(inspected.ID)
+	state.Oracle.Running = inspected.Running
+	state.Oracle.Status = inspected.Status
+	if inspected.Restarting {
 		state.Oracle.Status = "restarting"
 	}
-	if container.State.Health != nil {
-		state.Oracle.Health = container.State.Health.Status
-		switch container.State.Health.Status {
+	if inspected.HealthConfigured {
+		state.Oracle.Health = inspected.Health
+		switch inspected.Health {
 		case "healthy":
 			state.Oracle.Readiness = "ready"
 		case "starting":
@@ -263,25 +196,27 @@ func (m *resourceManager) state(ctx context.Context) managerState {
 		}
 	} else {
 		state.Oracle.Health = "not-configured"
-		state.Oracle.Readiness = "unknown"
+		if inspected.Running {
+			state.Oracle.Readiness = "ready"
+		} else {
+			state.Oracle.Readiness = "not-ready"
+		}
 	}
-	state.Resources.AppliedCPUs = float64(container.HostConfig.NanoCPUs) / 1_000_000_000
-	state.Resources.AppliedMemoryBytes = container.HostConfig.Memory
-	for _, mount := range container.Mounts {
+	state.Resources.AppliedCPUs = inspected.CPUs
+	state.Resources.AppliedMemoryBytes = inspected.MemoryBytes
+	for _, item := range inspected.Mounts {
 		state.Storage = append(state.Storage, storageMount{
-			Type:        mount.Type,
-			Name:        mount.Name,
-			Source:      mount.Source,
-			Destination: mount.Destination,
+			Type: item.Type, Name: item.Name, Source: item.Source, Destination: item.Destination,
 		})
 	}
-
-	if state.Oracle.Running {
-		statsOutput, statsErr := m.runner.Output(ctx, "docker", "stats", "--no-stream", "--format", "{{json .}}", containerID)
+	if inspected.Running {
+		stats, statsErr := m.engine.Stats(ctx, oracleContainerName)
 		if statsErr != nil {
-			state.Resources.Error = friendlyCommandOutputError("Resource statistics unavailable", statsOutput, statsErr)
-		} else if err := parseContainerStats(statsOutput, &state.Resources); err != nil {
-			state.Resources.Error = err.Error()
+			state.Resources.Error = friendlyEngineError("Resource statistics unavailable", statsErr)
+		} else {
+			state.Resources.CPUPercent = stats.CPUPercent
+			state.Resources.MemoryUsageBytes = stats.MemoryUsedBytes
+			state.Resources.StatsAvailable = true
 		}
 	}
 	return state
@@ -292,7 +227,6 @@ func (m *resourceManager) apply(ctx context.Context, request applyRequest) opera
 		return operationResult{Message: "Another OraLab operation is already in progress."}
 	}
 	defer m.opMu.Unlock()
-
 	operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
 	defer cancel()
 	before := m.state(operationContext)
@@ -300,52 +234,33 @@ func (m *resourceManager) apply(ctx context.Context, request applyRequest) opera
 		return operationResult{Message: validationError, State: before}
 	}
 	if !before.Docker.LocalContext {
-		return operationResult{Message: "Resource changes are disabled because the active Docker context is not local.", State: before}
+		return operationResult{Message: "Resource changes are disabled because the Docker Engine endpoint is not local.", State: before}
 	}
-	if before.Oracle.Running && !request.ConfirmRestart {
-		return operationResult{
-			RequiresRestart: true,
-			Message:         "Applying these limits requires a graceful Oracle container restart.",
-			State:           before,
-		}
-	}
-
-	memoryValue := fmt.Sprintf("%dg", request.MemoryGiB)
-	if err := updateResourceSettings(filepath.Join(m.root, environmentFile), request.CPUs, memoryValue); err != nil {
+	memoryBytes := int64(request.MemoryGiB) * 1024 * 1024 * 1024
+	if err := updateResourceSettings(filepath.Join(m.root, environmentFile), request.CPUs, fmt.Sprintf("%dg", request.MemoryGiB)); err != nil {
 		return operationResult{Message: fmt.Sprintf("Resource settings were not saved: %v", err), State: before}
 	}
 	result := operationResult{Saved: true}
-
-	service := before.Oracle.Service
-	if service == "" {
-		result.Message = "Settings were saved, but no Oracle Compose service is available to apply them."
+	if !before.Oracle.Exists {
+		result.OK = true
+		result.Message = "CPU and memory limits were saved and will be used when OraLab creates the Oracle container."
 		result.State = m.state(operationContext)
 		return result
 	}
-
-	var output []byte
-	var err error
-	if before.Oracle.Running {
-		output, err = m.composeOutput(operationContext, "up", "-d", "--force-recreate", "--wait", "--wait-timeout", strconv.Itoa(defaultWait), service)
-	} else {
-		output, err = m.composeOutput(operationContext, "create", "--force-recreate", service)
-	}
-	if err != nil {
-		result.Message = friendlyCommandOutputError("Settings were saved, but Docker could not apply them", output, err)
+	if err := m.engine.UpdateResources(operationContext, oracleContainerName, request.CPUs, memoryBytes); err != nil {
+		result.Message = friendlyEngineError("Settings were saved, but Docker could not apply them", err)
 		result.State = m.state(operationContext)
 		return result
 	}
-
 	after := m.state(operationContext)
 	result.State = after
-	expectedMemory := int64(request.MemoryGiB) * 1024 * 1024 * 1024
-	if nearlyEqual(after.Resources.AppliedCPUs, float64(request.CPUs)) && after.Resources.AppliedMemoryBytes == expectedMemory {
+	if nearlyEqual(after.Resources.AppliedCPUs, float64(request.CPUs)) && after.Resources.AppliedMemoryBytes == memoryBytes {
 		result.OK = true
 		result.Applied = true
-		result.Message = "CPU and memory limits were saved and verified by Docker."
+		result.Message = "CPU and memory limits were saved and verified through the Docker Engine API."
 		return result
 	}
-	result.Message = "Settings were saved, but Docker's effective limits do not match the requested values. Check that compose.yaml uses ORACLE_CPUS and ORACLE_MEMORY."
+	result.Message = "Settings were saved, but Docker's effective limits do not match the requested values."
 	return result
 }
 
@@ -354,7 +269,6 @@ func (m *resourceManager) lifecycle(ctx context.Context, request lifecycleReques
 		return operationResult{Message: "Another OraLab operation is already in progress."}
 	}
 	defer m.opMu.Unlock()
-
 	operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
 	defer cancel()
 	before := m.state(operationContext)
@@ -362,121 +276,152 @@ func (m *resourceManager) lifecycle(ctx context.Context, request lifecycleReques
 		return operationResult{Message: "Docker Engine is unavailable.", State: before}
 	}
 	if !before.Docker.LocalContext {
-		return operationResult{Message: "Lifecycle operations are disabled because the active Docker context is not local.", State: before}
+		return operationResult{Message: "Lifecycle operations are disabled because the Docker Engine endpoint is not local.", State: before}
 	}
-	service := before.Oracle.Service
-	if service == "" {
-		return operationResult{Message: "No Oracle Compose service was found.", State: before}
-	}
-
-	var output []byte
 	var err error
 	switch request.Action {
 	case "start":
-		output, err = m.composeOutput(operationContext, "up", "-d", "--wait", "--wait-timeout", strconv.Itoa(defaultWait), service)
-	case "stop":
-		output, err = m.composeOutput(operationContext, "stop", "--timeout", strconv.Itoa(defaultStop), service)
-	case "restart":
-		output, err = m.composeOutput(operationContext, "stop", "--timeout", strconv.Itoa(defaultStop), service)
+		_, err = ensureOracleContainer(operationContext, m.engine, m.root)
+		if err == nil && !before.Oracle.Running {
+			err = m.engine.StartContainer(operationContext, oracleContainerName)
+		}
 		if err == nil {
-			output, err = m.composeOutput(operationContext, "up", "-d", "--wait", "--wait-timeout", strconv.Itoa(defaultWait), service)
+			err = waitForReadiness(operationContext, m.engine, oracleContainerName)
+		}
+	case "stop":
+		if !before.Oracle.Exists || !before.Oracle.Running {
+			return operationResult{OK: true, Message: "Oracle is already stopped.", State: before}
+		}
+		err = m.engine.StopContainer(operationContext, oracleContainerName, defaultStop)
+	case "restart":
+		if !before.Oracle.Exists {
+			return operationResult{Message: "The Oracle container has not been created; use start first.", State: before}
+		}
+		err = m.engine.RestartContainer(operationContext, oracleContainerName, defaultStop)
+		if err == nil {
+			err = waitForReadiness(operationContext, m.engine, oracleContainerName)
 		}
 	default:
 		return operationResult{Message: "Unsupported lifecycle action.", State: before}
 	}
 	if err != nil {
-		return operationResult{Message: friendlyCommandOutputError("Oracle lifecycle operation failed", output, err), State: m.state(operationContext)}
+		return operationResult{Message: friendlyEngineError("Oracle lifecycle operation failed", err), State: m.state(operationContext)}
 	}
-
 	after := m.state(operationContext)
 	succeeded := request.Action == "stop" && !after.Oracle.Running || request.Action != "stop" && after.Oracle.Running
 	if !succeeded {
 		return operationResult{Message: "Docker completed the operation, but the requested Oracle state was not verified.", State: after}
 	}
-	return operationResult{OK: true, Applied: true, Message: "Oracle lifecycle operation completed and its container state was verified.", State: after}
+	return operationResult{OK: true, Applied: true, Message: "Oracle lifecycle operation completed and its state was verified.", State: after}
 }
 
-func (m *resourceManager) dockerContext(ctx context.Context) (string, string, error) {
-	nameOutput, err := m.runner.Output(ctx, "docker", "context", "show")
+func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string) (engineContainer, error) {
+	existing, err := engine.InspectContainer(ctx, oracleContainerName)
+	if err == nil {
+		if !existing.Managed {
+			return engineContainer{}, errors.New("a container named oralab-oracle exists but is not managed by OraLab")
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, errDockerObjectNotFound) {
+		return engineContainer{}, err
+	}
+	config, err := readLabConfig(filepath.Join(root, environmentFile))
 	if err != nil {
-		return "", "", errors.New(friendlyCommandOutputError("cannot read active Docker context", nameOutput, err))
+		return engineContainer{}, err
 	}
-	name := strings.TrimSpace(string(nameOutput))
-	inspectOutput, err := m.runner.Output(ctx, "docker", "context", "inspect", name)
+	if config.Image == "" {
+		return engineContainer{}, errors.New("ORACLE_IMAGE is empty; select the validated Oracle 19c image first")
+	}
+	if config.Password == "" {
+		return engineContainer{}, errors.New("ORACLE_PWD is empty")
+	}
+	if config.CPUs <= 0 || config.MemoryBytes <= 0 {
+		return engineContainer{}, errors.New("ORACLE_CPUS and ORACLE_MEMORY must be configured before creating Oracle")
+	}
+	if err := engine.EnsureImage(ctx, config.Image); err != nil {
+		return engineContainer{}, fmt.Errorf("make Oracle image available: %w", err)
+	}
+	_, err = engine.CreateContainer(ctx, engineContainerSpec{
+		Name: oracleContainerName, Image: config.Image,
+		Environment: []string{passwordSettingKey + "=" + config.Password},
+		CPUs:        config.CPUs, MemoryBytes: config.MemoryBytes, ShmBytes: config.ShmBytes,
+		StopTimeout: defaultStop, VolumeName: oracleVolumeName, VolumePath: oracleDataPath,
+		HostIP: "127.0.0.1", HostPort: oracleListenerPort, TargetPort: oracleListenerPort + "/tcp",
+		Labels: map[string]string{managedLabel: "true"},
+	})
 	if err != nil {
-		return name, "", errors.New(friendlyCommandOutputError("cannot inspect active Docker context", inspectOutput, err))
+		return engineContainer{}, err
 	}
-	var contexts []struct {
-		Endpoints map[string]struct {
-			Host string `json:"Host"`
-		} `json:"Endpoints"`
-	}
-	if err := json.Unmarshal(inspectOutput, &contexts); err != nil || len(contexts) != 1 {
-		return name, "", errors.New("Docker returned unreadable context information")
-	}
-	return name, contexts[0].Endpoints["docker"].Host, nil
+	return engine.InspectContainer(ctx, oracleContainerName)
 }
 
-func (m *resourceManager) discoverOracleService(ctx context.Context) (string, error) {
-	if !regularFile(filepath.Join(m.root, composeFileName)) {
-		return "", fmt.Errorf("%s is missing", composeFileName)
-	}
-	output, err := m.composeOutput(ctx, "config", "--services")
-	if err != nil {
-		return "", errors.New(friendlyCommandOutputError("Compose service discovery failed", output, err))
-	}
-	var services []string
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		if service := strings.TrimSpace(scanner.Text()); service != "" {
-			services = append(services, service)
+func waitForReadiness(ctx context.Context, engine dockerEngine, name string) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		inspected, err := engine.InspectContainer(ctx, name)
+		if err != nil {
+			return err
+		}
+		if !inspected.Running {
+			return fmt.Errorf("container stopped with exit code %d", inspected.ExitCode)
+		}
+		if !inspected.HealthConfigured || inspected.Health == "healthy" {
+			return nil
+		}
+		if inspected.Health == "unhealthy" {
+			return errors.New("container healthcheck reports unhealthy")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
-	for _, service := range services {
-		if service == serviceName {
-			return service, nil
-		}
-	}
-	if len(services) == 1 {
-		return services[0], nil
-	}
-	if len(services) == 0 {
-		return "", errors.New("Compose defines no services")
-	}
-	return "", errors.New("Compose defines multiple services and none is named oracle")
 }
 
-func (m *resourceManager) composeOutput(ctx context.Context, args ...string) ([]byte, error) {
-	composePath := filepath.Join(m.root, composeFileName)
-	fullArgs := []string{"compose", "--project-directory", m.root, "--file", composePath}
-	fullArgs = append(fullArgs, args...)
-	return m.runner.Output(ctx, "docker", fullArgs...)
-}
-
-func readResourceSettings(path string) (int, int64, error) {
+func readLabConfig(path string) (labConfig, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return 0, 0, err
+		if errors.Is(err, os.ErrNotExist) {
+			return labConfig{}, errors.New(".env is missing; run oralab setup first")
+		}
+		return labConfig{}, err
 	}
 	values, err := parseEnvironment(contents)
 	if err != nil {
-		return 0, 0, err
+		return labConfig{}, err
 	}
-	var cpus int
+	config := labConfig{Image: strings.TrimSpace(values[imageSettingKey]), Password: values[passwordSettingKey]}
 	if value := strings.TrimSpace(values[cpuSettingKey]); value != "" {
-		cpus, err = strconv.Atoi(value)
-		if err != nil || cpus <= 0 {
-			return 0, 0, fmt.Errorf("%s must be a positive whole number", cpuSettingKey)
+		config.CPUs, err = strconv.Atoi(value)
+		if err != nil || config.CPUs <= 0 {
+			return labConfig{}, fmt.Errorf("%s must be a positive whole number", cpuSettingKey)
 		}
 	}
-	var memory int64
 	if value := strings.TrimSpace(values[memorySettingKey]); value != "" {
-		memory, err = parseByteSize(value)
-		if err != nil || memory <= 0 {
-			return 0, 0, fmt.Errorf("%s is invalid", memorySettingKey)
+		config.MemoryBytes, err = parseByteSize(value)
+		if err != nil || config.MemoryBytes <= 0 {
+			return labConfig{}, fmt.Errorf("%s is invalid", memorySettingKey)
 		}
 	}
-	return cpus, memory, nil
+	config.ShmBytes = 1024 * 1024 * 1024
+	if value := strings.TrimSpace(values[shmSettingKey]); value != "" {
+		config.ShmBytes, err = parseByteSize(value)
+		if err != nil || config.ShmBytes <= 0 {
+			return labConfig{}, fmt.Errorf("%s is invalid", shmSettingKey)
+		}
+	}
+	if config.MemoryBytes > 0 && config.ShmBytes > config.MemoryBytes {
+		return labConfig{}, fmt.Errorf("%s cannot exceed %s", shmSettingKey, memorySettingKey)
+	}
+	return config, nil
+}
+
+func readResourceSettings(path string) (int, int64, error) {
+	config, err := readLabConfig(path)
+	return config.CPUs, config.MemoryBytes, err
 }
 
 func parseEnvironment(contents []byte) (map[string]string, error) {
@@ -566,7 +511,6 @@ func replaceFileSafely(path string, contents []byte) error {
 	if err := os.Rename(temporaryPath, path); err == nil {
 		return nil
 	}
-
 	backupPath := path + ".oralab-backup"
 	if _, err := os.Stat(backupPath); err == nil {
 		return fmt.Errorf("backup file already exists: %s", backupPath)
@@ -602,33 +546,6 @@ func validateResourceRequest(request applyRequest, state managerState) string {
 	return ""
 }
 
-func parseContainerStats(output []byte, state *resourceState) error {
-	var stats struct {
-		CPUPercent string `json:"CPUPerc"`
-		Memory     string `json:"MemUsage"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(output), &stats); err != nil {
-		return errors.New("Docker returned unreadable resource statistics")
-	}
-	cpuText := strings.TrimSuffix(strings.TrimSpace(stats.CPUPercent), "%")
-	cpu, err := strconv.ParseFloat(cpuText, 64)
-	if err != nil {
-		return errors.New("Docker returned an unreadable CPU statistic")
-	}
-	memoryUsed, _, found := strings.Cut(stats.Memory, "/")
-	if !found {
-		return errors.New("Docker returned an unreadable memory statistic")
-	}
-	memory, err := parseByteSize(strings.TrimSpace(memoryUsed))
-	if err != nil {
-		return errors.New("Docker returned an unreadable memory statistic")
-	}
-	state.CPUPercent = cpu
-	state.MemoryUsageBytes = memory
-	state.StatsAvailable = true
-	return nil
-}
-
 func parseByteSize(value string) (int64, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -662,7 +579,19 @@ func parseByteSize(value string) (int64, error) {
 
 func isLocalDockerEndpoint(endpoint string) bool {
 	endpoint = strings.ToLower(strings.TrimSpace(endpoint))
-	return endpoint == "" || strings.HasPrefix(endpoint, "unix://") || strings.HasPrefix(endpoint, "npipe://")
+	if endpoint == "" || strings.HasPrefix(endpoint, "unix://") || strings.HasPrefix(endpoint, "npipe://") {
+		return true
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || (parsed.Scheme != "tcp" && parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
 }
 
 func hostOSName(goos string) string {
@@ -701,18 +630,14 @@ func formatBytes(value int64) string {
 	return fmt.Sprintf("%d MiB", value/(1024*1024))
 }
 
-func friendlyCommandError(prefix string, err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return prefix + ": operation timed out"
+func friendlyEngineError(prefix string, err error) string {
+	if err == nil {
+		return prefix + "."
 	}
-	return prefix + "."
-}
-
-func friendlyCommandOutputError(prefix string, output []byte, err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return prefix + ": operation timed out."
 	}
-	message := strings.TrimSpace(string(output))
+	message := strings.TrimSpace(err.Error())
 	if len(message) > 400 {
 		message = message[:400] + "…"
 	}

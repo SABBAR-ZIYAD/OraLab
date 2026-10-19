@@ -1,63 +1,47 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 const (
-	serviceName       = "oracle"
 	defaultWait       = 1800
 	defaultStop       = 600
-	composeFileName   = "compose.yaml"
 	environmentSample = ".env.example"
 	environmentFile   = ".env"
 )
 
 var version = "dev"
 
-type commandRunner interface {
-	LookPath(file string) (string, error)
-	Run(name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error
-}
-
-type systemRunner struct{}
-
-func (systemRunner) LookPath(file string) (string, error) {
-	return exec.LookPath(file)
-}
-
-func (systemRunner) Run(name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	command := exec.Command(name, args...)
-	command.Stdin = stdin
-	command.Stdout = stdout
-	command.Stderr = stderr
-	return command.Run()
-}
+type engineFactory func() (dockerEngine, error)
 
 type app struct {
-	runner commandRunner
-	stdin  io.Reader
-	stdout io.Writer
-	stderr io.Writer
-	getwd  func() (string, error)
-	getenv func(string) string
+	stdin     io.Reader
+	stdout    io.Writer
+	stderr    io.Writer
+	getwd     func() (string, error)
+	getenv    func(string) string
+	newEngine engineFactory
 }
 
 func main() {
 	a := app{
-		runner: systemRunner{},
-		stdin:  os.Stdin,
-		stdout: os.Stdout,
-		stderr: os.Stderr,
-		getwd:  os.Getwd,
-		getenv: os.Getenv,
+		stdin:     os.Stdin,
+		stdout:    os.Stdout,
+		stderr:    os.Stderr,
+		getwd:     os.Getwd,
+		getenv:    os.Getenv,
+		newEngine: newMobyEngine,
 	}
 	os.Exit(a.run(os.Args[1:]))
 }
@@ -68,12 +52,10 @@ func (a app) run(args []string) int {
 		fmt.Fprintf(a.stderr, "oralab: %v\n", err)
 		return 2
 	}
-
 	if len(args) == 0 {
 		a.printHelp(a.stdout)
 		return 0
 	}
-
 	command := args[0]
 	commandArgs := args[1:]
 	switch command {
@@ -84,7 +66,6 @@ func (a app) run(args []string) int {
 		fmt.Fprintf(a.stdout, "oralab %s\n", version)
 		return 0
 	}
-
 	root, err := a.resolveProjectDir(projectDir)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "oralab: %v\n", err)
@@ -104,24 +85,26 @@ func (a app) run(args []string) int {
 			fmt.Fprintln(a.stderr, "usage: oralab up [--timeout SECONDS]")
 			return 2
 		}
-		return a.compose(root, "up", "-d", "--wait", "--wait-timeout", strconv.Itoa(seconds), serviceName)
+		return a.up(root, seconds)
 	case "status":
 		if len(commandArgs) != 0 {
 			fmt.Fprintln(a.stderr, "usage: oralab status")
 			return 2
 		}
-		return a.compose(root, "ps", serviceName)
+		return a.status(root)
 	case "logs":
-		composeArgs := []string{"logs", "--follow"}
-		composeArgs = append(composeArgs, commandArgs...)
-		composeArgs = append(composeArgs, serviceName)
-		return a.compose(root, composeArgs...)
+		options, ok := parseLogOptions(commandArgs)
+		if !ok {
+			fmt.Fprintln(a.stderr, "usage: oralab logs [--no-follow] [--tail LINES] [--since VALUE] [--timestamps]")
+			return 2
+		}
+		return a.logs(options)
 	case "shell":
 		if len(commandArgs) != 0 {
 			fmt.Fprintln(a.stderr, "usage: oralab shell")
 			return 2
 		}
-		return a.compose(root, "exec", serviceName, "bash")
+		return a.exec([]string{"bash"})
 	case "exec":
 		if len(commandArgs) > 0 && commandArgs[0] == "--" {
 			commandArgs = commandArgs[1:]
@@ -130,29 +113,27 @@ func (a app) run(args []string) int {
 			fmt.Fprintln(a.stderr, "usage: oralab exec -- <native-command> [arguments...]")
 			return 2
 		}
-		composeArgs := []string{"exec", serviceName}
-		composeArgs = append(composeArgs, commandArgs...)
-		return a.compose(root, composeArgs...)
+		return a.exec(commandArgs)
 	case "start":
 		if len(commandArgs) != 0 {
 			fmt.Fprintln(a.stderr, "usage: oralab start")
 			return 2
 		}
-		return a.compose(root, "start", serviceName)
+		return a.start()
 	case "stop":
 		seconds, ok := parseTimeout(commandArgs, defaultStop)
 		if !ok {
 			fmt.Fprintln(a.stderr, "usage: oralab stop [--timeout SECONDS]")
 			return 2
 		}
-		return a.compose(root, "stop", "--timeout", strconv.Itoa(seconds), serviceName)
+		return a.stop(seconds)
 	case "restart":
 		seconds, ok := parseTimeout(commandArgs, defaultStop)
 		if !ok {
 			fmt.Fprintln(a.stderr, "usage: oralab restart [--timeout SECONDS]")
 			return 2
 		}
-		return a.compose(root, "restart", "--timeout", strconv.Itoa(seconds), serviceName)
+		return a.restart(seconds)
 	default:
 		fmt.Fprintf(a.stderr, "oralab: unknown command %q\n\n", command)
 		a.printHelp(a.stderr)
@@ -193,7 +174,6 @@ func (a app) resolveProjectDir(explicit string) (string, error) {
 		}
 		return absolute, nil
 	}
-
 	workingDirectory, err := a.getwd()
 	if err != nil {
 		return "", fmt.Errorf("determine current directory: %w", err)
@@ -220,7 +200,7 @@ func findProjectDirectory(start string) (string, error) {
 }
 
 func isProjectDirectory(path string) bool {
-	return regularFile(filepath.Join(path, composeFileName)) || regularFile(filepath.Join(path, "PROJECT_PLAN.md"))
+	return regularFile(filepath.Join(path, environmentSample)) || regularFile(filepath.Join(path, "PROJECT_PLAN.md"))
 }
 
 func regularFile(path string) bool {
@@ -228,28 +208,180 @@ func regularFile(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-func (a app) compose(root string, args ...string) int {
-	composePath := filepath.Join(root, composeFileName)
-	if !regularFile(composePath) {
-		fmt.Fprintf(a.stderr, "oralab: %s does not exist; the Oracle environment has not been implemented yet\n", composePath)
-		return 1
+func (a app) openEngine() (dockerEngine, bool) {
+	engine, err := a.newEngine()
+	if err != nil {
+		fmt.Fprintf(a.stderr, "oralab: connect to Docker Engine API: %v\n", err)
+		return nil, false
 	}
-	fullArgs := []string{"compose", "--project-directory", root, "--file", composePath}
-	fullArgs = append(fullArgs, args...)
-	return a.execute("docker", fullArgs...)
+	return engine, true
 }
 
-func (a app) execute(name string, args ...string) int {
-	err := a.runner.Run(name, args, a.stdin, a.stdout, a.stderr)
-	if err == nil {
-		return 0
+func (a app) up(root string, seconds int) int {
+	engine, ok := a.openEngine()
+	if !ok {
+		return 1
 	}
-	var exitError *exec.ExitError
-	if errors.As(err, &exitError) {
-		return exitError.ExitCode()
+	defer engine.Close()
+	if !isLocalDockerEndpoint(engine.Endpoint()) {
+		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+		return 1
 	}
-	fmt.Fprintf(a.stderr, "oralab: cannot run %s: %v\n", name, err)
-	return 1
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
+	defer cancel()
+	inspected, err := ensureOracleContainer(ctx, engine, root)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "oralab: prepare Oracle container: %v\n", err)
+		return 1
+	}
+	if !inspected.Running {
+		if err := engine.StartContainer(ctx, oracleContainerName); err != nil {
+			fmt.Fprintf(a.stderr, "oralab: start Oracle container: %v\n", err)
+			return 1
+		}
+	}
+	if err := waitForReadiness(ctx, engine, oracleContainerName); err != nil {
+		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(a.stdout, "Oracle container is running and ready.")
+	return 0
+}
+
+func (a app) status(root string) int {
+	engine, err := a.newEngine()
+	manager := newResourceManager(root, engine, err)
+	if engine != nil {
+		defer engine.Close()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
+	defer cancel()
+	state := manager.state(ctx)
+	if !state.Docker.Reachable {
+		fmt.Fprintf(a.stderr, "oralab: %s\n", state.Docker.Error)
+		return 1
+	}
+	fmt.Fprintf(a.stdout, "Docker: %s %s (%s)\n", state.Docker.EngineOS, state.Docker.Version, state.Docker.Endpoint)
+	fmt.Fprintf(a.stdout, "Oracle: %s; readiness=%s; health=%s\n", state.Oracle.Status, state.Oracle.Readiness, state.Oracle.Health)
+	if state.Oracle.ContainerID != "" {
+		fmt.Fprintf(a.stdout, "Container: %s (%s)\n", oracleContainerName, state.Oracle.ContainerID)
+	}
+	if state.Oracle.Error != "" {
+		fmt.Fprintf(a.stderr, "oralab: %s\n", state.Oracle.Error)
+		return 1
+	}
+	return 0
+}
+
+func (a app) logs(options logOptions) int {
+	engine, ok := a.openEngine()
+	if !ok {
+		return 1
+	}
+	defer engine.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := engine.Logs(ctx, oracleContainerName, options, a.stdout, a.stderr); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(a.stderr, "oralab: read Oracle logs: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a app) exec(command []string) int {
+	engine, ok := a.openEngine()
+	if !ok {
+		return 1
+	}
+	defer engine.Close()
+	if !isLocalDockerEndpoint(engine.Endpoint()) {
+		fmt.Fprintln(a.stderr, "oralab: refusing container execution through a remote Docker endpoint")
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	exitCode, err := engine.Exec(ctx, oracleContainerName, command, true, a.stdin, a.stdout, a.stderr)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "oralab: execute in Oracle container: %v\n", err)
+		return 1
+	}
+	return exitCode
+}
+
+func (a app) start() int {
+	engine, ok := a.openEngine()
+	if !ok {
+		return 1
+	}
+	defer engine.Close()
+	if !isLocalDockerEndpoint(engine.Endpoint()) {
+		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(defaultWait)*time.Second)
+	defer cancel()
+	inspected, err := engine.InspectContainer(ctx, oracleContainerName)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "oralab: inspect Oracle container: %v\n", err)
+		return 1
+	}
+	if !inspected.Managed {
+		fmt.Fprintln(a.stderr, "oralab: the oralab-oracle container is not managed by OraLab")
+		return 1
+	}
+	if !inspected.Running {
+		if err := engine.StartContainer(ctx, oracleContainerName); err != nil {
+			fmt.Fprintf(a.stderr, "oralab: start Oracle container: %v\n", err)
+			return 1
+		}
+	}
+	if err := waitForReadiness(ctx, engine, oracleContainerName); err != nil {
+		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a app) stop(seconds int) int {
+	engine, ok := a.openEngine()
+	if !ok {
+		return 1
+	}
+	defer engine.Close()
+	if !isLocalDockerEndpoint(engine.Endpoint()) {
+		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+60)*time.Second)
+	defer cancel()
+	if err := engine.StopContainer(ctx, oracleContainerName, seconds); err != nil {
+		fmt.Fprintf(a.stderr, "oralab: stop Oracle container: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a app) restart(seconds int) int {
+	engine, ok := a.openEngine()
+	if !ok {
+		return 1
+	}
+	defer engine.Close()
+	if !isLocalDockerEndpoint(engine.Endpoint()) {
+		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+	if err := engine.RestartContainer(ctx, oracleContainerName, seconds); err != nil {
+		fmt.Fprintf(a.stderr, "oralab: restart Oracle container: %v\n", err)
+		return 1
+	}
+	if err := waitForReadiness(ctx, engine, oracleContainerName); err != nil {
+		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func (a app) doctor(root string, args []string) int {
@@ -259,46 +391,51 @@ func (a app) doctor(root string, args []string) int {
 	}
 	fmt.Fprintln(a.stdout, "OraLab environment check")
 	failed := false
-	dockerAvailable := true
-
-	if _, err := a.runner.LookPath("docker"); err != nil {
-		fmt.Fprintln(a.stderr, "[FAIL] Docker CLI was not found in PATH")
-		failed = true
-		dockerAvailable = false
-	} else {
-		fmt.Fprintln(a.stdout, "[PASS] Docker CLI found")
-		if a.execute("docker", "--version") != 0 {
-			failed = true
-		}
-		if a.execute("docker", "compose", "version") != 0 {
-			failed = true
-		}
-	}
-
-	composePath := filepath.Join(root, composeFileName)
-	if !regularFile(composePath) {
-		fmt.Fprintf(a.stderr, "[FAIL] Missing %s\n", composePath)
+	engine, err := a.newEngine()
+	if err != nil {
+		fmt.Fprintf(a.stderr, "[FAIL] Docker Engine API client: %v\n", err)
 		failed = true
 	} else {
-		fmt.Fprintf(a.stdout, "[PASS] Found %s\n", composePath)
-		if !dockerAvailable {
-			fmt.Fprintln(a.stderr, "[SKIP] Compose validation requires Docker")
-		} else if a.compose(root, "config", "--quiet") != 0 {
+		defer engine.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
+		defer cancel()
+		info, infoErr := engine.Info(ctx)
+		if infoErr != nil {
+			fmt.Fprintf(a.stderr, "[FAIL] Docker Engine API: %v\n", infoErr)
 			failed = true
 		} else {
-			fmt.Fprintln(a.stdout, "[PASS] Compose configuration is valid")
+			fmt.Fprintf(a.stdout, "[PASS] Docker Engine %s at %s\n", info.ServerVersion, engine.Endpoint())
+			if isLocalDockerEndpoint(engine.Endpoint()) {
+				fmt.Fprintln(a.stdout, "[PASS] Docker endpoint is local")
+			} else {
+				fmt.Fprintln(a.stderr, "[WARN] Docker endpoint is remote; OraLab mutations are disabled")
+			}
 		}
 	}
-
-	if regularFile(filepath.Join(root, environmentFile)) {
+	envPath := filepath.Join(root, environmentFile)
+	if regularFile(envPath) {
 		fmt.Fprintln(a.stdout, "[PASS] Local .env exists")
+		config, configErr := readLabConfig(envPath)
+		if configErr != nil {
+			fmt.Fprintf(a.stderr, "[FAIL] Local .env: %v\n", configErr)
+			failed = true
+		} else {
+			if config.Image == "" {
+				fmt.Fprintln(a.stderr, "[WARN] ORACLE_IMAGE is not configured")
+			}
+			if config.Password == "" {
+				fmt.Fprintln(a.stderr, "[WARN] ORACLE_PWD is not configured")
+			}
+			if config.CPUs == 0 || config.MemoryBytes == 0 {
+				fmt.Fprintln(a.stderr, "[WARN] Oracle CPU/RAM limits are not configured")
+			}
+		}
 	} else if regularFile(filepath.Join(root, environmentSample)) {
 		fmt.Fprintln(a.stderr, "[WARN] Local .env is missing; run: oralab setup")
 	} else {
 		fmt.Fprintln(a.stderr, "[FAIL] Both .env and .env.example are missing")
 		failed = true
 	}
-
 	if failed {
 		return 1
 	}
@@ -322,7 +459,6 @@ func (a app) setup(root string, args []string) int {
 		return 1
 	}
 	defer input.Close()
-
 	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
 		fmt.Fprintf(a.stderr, "oralab: refusing to overwrite existing %s\n", destination)
@@ -332,7 +468,6 @@ func (a app) setup(root string, args []string) int {
 		fmt.Fprintf(a.stderr, "oralab: create %s: %v\n", destination, err)
 		return 1
 	}
-
 	_, copyErr := io.Copy(output, input)
 	closeErr := output.Close()
 	if copyErr != nil || closeErr != nil {
@@ -362,20 +497,49 @@ func parseTimeout(args []string, fallback int) (int, bool) {
 	return seconds, true
 }
 
+func parseLogOptions(args []string) (logOptions, bool) {
+	options := logOptions{Follow: true, Tail: "all"}
+	for len(args) > 0 {
+		switch args[0] {
+		case "--no-follow":
+			options.Follow = false
+			args = args[1:]
+		case "--timestamps":
+			options.Timestamps = true
+			args = args[1:]
+		case "--tail":
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+				return logOptions{}, false
+			}
+			options.Tail = args[1]
+			args = args[2:]
+		case "--since":
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+				return logOptions{}, false
+			}
+			options.Since = args[1]
+			args = args[2:]
+		default:
+			return logOptions{}, false
+		}
+	}
+	return options, true
+}
+
 func (a app) printHelp(writer io.Writer) {
-	fmt.Fprintln(writer, `OraLab manages the Docker environment; Oracle commands remain unchanged.
+	fmt.Fprintln(writer, `OraLab talks directly to the Docker Engine API; Oracle commands remain unchanged.
 
 Usage:
   oralab [--project-dir PATH] <command>
 
 Commands:
-  doctor                     Check Docker and project configuration
+  doctor                     Check Docker Engine and project configuration
   setup                      Create .env safely from .env.example
   ui [--port PORT] [--no-open]
                               Open the local CPU/RAM resource manager
-  up [--timeout SECONDS]     Start Oracle and wait for readiness
-  status                     Show the Oracle service status
-  logs [COMPOSE LOG OPTIONS] Follow Oracle container logs
+  up [--timeout SECONDS]     Create/start Oracle and wait for readiness
+  status                     Show Docker and Oracle container status
+  logs [OPTIONS]             Follow Oracle logs through the Engine API
   shell                      Enter the Oracle container shell
   exec -- COMMAND [ARGS...]  Run a native command unchanged in the container
   start                      Start the existing Oracle container
@@ -383,6 +547,9 @@ Commands:
   restart [--timeout SECONDS] Restart Oracle gracefully
   version                    Show the OraLab version
   help                       Show this help
+
+Log options:
+  --no-follow  --tail LINES  --since VALUE  --timestamps
 
 Native Oracle examples:
   oralab exec -- sqlplus / as sysdba

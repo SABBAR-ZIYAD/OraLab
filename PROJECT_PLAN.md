@@ -35,9 +35,9 @@ The first-use experience should be this straightforward:
 1. Student installs an appropriate Docker runtime and obtains access to a **legitimately licensed, architecture-compatible Oracle 19c image**.
 2. Student downloads/clones this small configuration repository.
 3. Student runs `oralab setup`, selects image and local password/initial resource settings, and performs any required Oracle registry sign-in/terms acceptance.
-4. Student runs `oralab up` to launch the instance. OraLab uses Docker Compose internally and behaves consistently on Windows, Linux and macOS.
+4. Student runs `oralab up` to launch the instance. OraLab talks directly to the Docker Engine API and behaves consistently on Windows, Linux and macOS.
 5. Student follows live logs or checks the verified health/readiness mechanism; no fixed “sleep 90 seconds” guesswork.
-6. Student enters the running container and uses `sqlplus / as sysdba`, or uses `docker compose exec ... sqlplus / as sysdba` directly.
+6. Student enters the running container and uses `sqlplus / as sysdba`, or uses `oralab exec -- sqlplus / as sysdba` directly.
 7. Student uses `rman target /`, `lsnrctl status`, Data Pump, and SQL queries normally.
 8. Student stops the environment gracefully. Starting it again later shows the **same database**, not a new one.
 
@@ -81,8 +81,8 @@ OraLab manages only setup, Docker lifecycle, readiness, logs and container acces
 ### 4.1 Core architecture
 
 - **Container runtime:** Docker Engine on Linux, Docker Desktop with WSL 2 on Windows, Docker Desktop or supported compatible Linux-container runtime on macOS.
-- **Orchestration:** one `compose.yaml` service for one real Oracle 19c single-instance database, using Docker Compose v2.
-- **Universal host CLI:** one small Go codebase compiled to standalone `oralab` executables for Windows, Linux and macOS. End users require no Go installation. The CLI invokes Docker Compose and transparently passes native Oracle commands; it is not a custom DBA interface.
+- **Container control:** the supported Moby Go client talks directly to Docker Engine with automatic API negotiation. OraLab owns one `oralab-oracle` container and its named volumes; Docker Compose is not required.
+- **Universal host CLI:** one small Go codebase compiled to standalone `oralab` executables for Windows, Linux and macOS. End users require no Go installation or Docker CLI. OraLab uses typed Engine API calls and transparently passes native Oracle commands; it is not a custom DBA interface.
 - **Local resource UI:** `oralab ui` serves embedded HTML/CSS/JavaScript on `127.0.0.1:8765` by default. It reads actual Docker capabilities, effective container limits and live statistics; it changes only the Oracle container CPU/RAM limits and performs confirmed lifecycle operations. It exposes no SQL, terminal, arbitrary-command or volume-deletion endpoint.
 - **Image:** official Oracle Container Registry 19c image, **or** an image built locally from Oracle's official `oracle/docker-images` SingleInstance recipes and separately obtained Oracle 19c binaries. No unverified third-party Oracle images.
 - **Inside container:** Oracle Database 19c on Linux, listener, SQL*Plus, RMAN and the native included administration utilities.
@@ -119,14 +119,16 @@ Target layout (trim any file with no proven purpose):
 oracle19c-dba-lab/
 ├── PROJECT_PLAN.md
 ├── README.md
-├── compose.yaml
 ├── go.mod
+├── go.sum
 ├── cmd/
 │   └── oralab/
 │       ├── main.go
+│       ├── docker_engine.go
 │       ├── resource_manager.go
 │       ├── ui_server.go
 │       ├── main_test.go
+│       ├── docker_engine_test.go
 │       └── web/             # Embedded, dependency-free local UI
 ├── .env.example
 ├── .gitignore
@@ -141,11 +143,11 @@ oracle19c-dba-lab/
     └── licensing.md        # Official image access and legal cautions
 ```
 
-Do **not** create `labs/`, `exercises/`, `datasets/`, `samples/`, a web app, or a separate service. OraLab is the sole project-specific command interface and must remain a thin Docker Compose lifecycle adapter. End users download a standalone native binary; they do not install Go, Bash, Make, Python, Node or Java to launch Oracle. Contributors may use Go to build and test OraLab.
+Do **not** create `labs/`, `exercises/`, `datasets/`, `samples/`, a web app, or a separate service. OraLab is the sole project-specific command interface and must remain a thin Docker Engine lifecycle adapter. End users download a standalone native binary; they do not install Go, Bash, Make, Python, Node or Java to launch Oracle. Contributors may use Go to build and test OraLab.
 
 ## 6. Implementation phases and agent tasks
 
-### Phase 0 — Verify official Oracle 19c prerequisites BEFORE writing an opinionated Compose file
+### Phase 0 — Verify official Oracle 19c prerequisites BEFORE finalizing the container specification
 
 **Tasks**
 
@@ -164,7 +166,7 @@ Do **not** create `labs/`, `exercises/`, `datasets/`, `samples/`, a web app, or 
 
 **Tasks**
 
-- [ ] Create **one** `compose.yaml` service named `oracle` (or select one service name and use it consistently everywhere).
+- [x] Implement one directly managed container named `oralab-oracle` through the supported Moby client modules.
 - [ ] Build and test the standalone `oralab` CLI for Windows AMD64, Linux AMD64/ARM64, and macOS AMD64/ARM64 from one Go codebase.
 - [ ] Limit OraLab to `doctor`, `setup`, `up`, `status`, `logs`, `shell`, `exec --`, `start`, `stop`, `restart`, `ui`, `version` and `help`. Do not add reset, destroy, prune or volume-deletion commands.
 - [ ] Ensure `oralab exec -- <command>` preserves native command names, arguments, interactive streams and exit status. Oracle commands remain `sqlplus`, `rman`, `lsnrctl`, `expdp` and `impdp`.
@@ -181,7 +183,7 @@ Do **not** create `labs/`, `exercises/`, `datasets/`, `samples/`, a web app, or 
 - [ ] Do not enable/initialize optional Oracle features simply to create extra functionality. Explain that some first-initialization variables do not retroactively modify an existing persisted database.
 - [ ] Test first initialization and a normal stop/start of **the same database**.
 
-**Exit condition:** A supported user follows README setup; `oralab up` starts a real Oracle 19c database through Docker Compose and it reaches a verifiable ready state. A second start reuses existing data. Raw Docker Compose commands remain documented for diagnosis and recovery if the CLI is unavailable.
+**Exit condition:** A supported user follows README setup; `oralab up` starts a real Oracle 19c database through Docker Engine and it reaches a verifiable ready state. A second start reuses existing data. The exact Engine API container specification and volume identity remain documented for diagnosis and recovery.
 
 ### Phase 2 — Validate the authentic command-line DBA experience
 
@@ -189,7 +191,7 @@ No custom DBA interface. Validate the Oracle tools directly.
 
 **Tasks**
 
-- [ ] Shell entry: `docker compose exec oracle bash`, user and `ORACLE_HOME`/`ORACLE_SID` environment inspection.
+- [ ] Shell entry: `oralab shell`, user and `ORACLE_HOME`/`ORACLE_SID` environment inspection.
 - [ ] SQL*Plus local privileged connection: `sqlplus / as sysdba`.
 - [ ] Instance identity and state: `v$instance`, `v$database`, database version/component/edition inspection.
 - [ ] Multitenant: inspect CDB/PDB and switch containers appropriately; confirm relevant operations are available.
@@ -213,7 +215,7 @@ No custom DBA interface. Validate the Oracle tools directly.
 |---|---|---|
 | P1 | Create disposable test object in database; stop and start container | Object still exists |
 | P2 | Restart Docker engine or host (where controllable) | Same Oracle database and object remain |
-| P3 | `docker compose down` **without** `-v`, then `up -d` using same project name/volumes | Same database and object remain |
+| P3 | Remove/recreate only the managed container through a disposable test harness while retaining `oralab-oradata` | Same database and object remain |
 | P4 | Delete/recreate the container **without** deleting named volumes | Same database and object remain |
 | P5 | Create RMAN backup in separately mounted backup path; recreate container | Backup files remain |
 | P6 | Create legitimate persistent, test-owned mutable configuration; recreate container | Required config remains, or documented, non-destructive startup recreation restores equivalent behavior |
@@ -225,9 +227,9 @@ No custom DBA interface. Validate the Oracle tools directly.
 - [ ] Confirm exactly which Oracle database files, password files, network settings, SPFILE, archive/FRA and diagnostic artifacts live within persistent storage in the chosen image. **Do not assume mounting `/opt/oracle/oradata` preserves every file under `$ORACLE_HOME`**.
 - [ ] Choose the smallest viable solution for other mutable required configuration: persist designated directories or reproducibly regenerate image-supported non-data configuration on startup. Avoid blindly mounting over Oracle software directories.
 - [ ] Preserve backup files independently of live data; explain that a Docker volume alone is **not** a database backup and that RMAN backups should be kept on independent storage for actual resilience.
-- [ ] Document named-volume identity and Compose project-name effects, especially if users rename the repository or change machines.
+- [ ] Document the fixed `oralab-oradata` volume identity, especially if users rename the repository or change machines.
 - [ ] Document backup storage consumption, archived redo growth, and disk-space planning.
-- [ ] Never call `docker compose down -v` or `docker volume prune` as a routine cleanup action. Any reset/deletion instructions must be visibly separated as **dangerous** and require manual user decision.
+- [ ] Never call the Engine volume-remove/prune endpoints as a routine action. Any reset/deletion instructions must be visibly separated as **dangerous** and require manual user decision.
 
 **Exit condition:** All feasible persistence tests show `PASS` with evidence. Any untested host reboot test is explicitly `NOT TESTED`; no false claims.
 
@@ -241,12 +243,12 @@ No custom DBA interface. Validate the Oracle tools directly.
 - [ ] Preserve reasonable headroom for Docker Desktop, the host operating system, and the database. Do not recommend limits based only on optimistic assumptions.
 - [ ] Document actual first-start vs later-start times only after measurement, rather than promising “instant startup.”
 - [ ] Make setup instructions host-specific **only where necessary**: WSL 2 prerequisites for Windows, Linux group/permission requirements, Docker Desktop VM resource settings on macOS, Apple Silicon image selection and ARM64 limitations.
-- [ ] Use shell-neutral Docker Compose CLI whenever possible. Show PowerShell alternatives for shell-dependent setup steps (e.g., copying `.env.example`).
+- [x] Use the Docker Engine Go API so lifecycle behavior is shell-neutral on every host.
 - [ ] Explain how to stop the Oracle container gracefully and restart it using simple consistent commands.
 - [ ] Make `oralab ui` display host OS, Docker availability/capacity, Oracle container state and database readiness without confusing Docker's Linux VM with the host OS.
 - [ ] Display configured and effective CPU/RAM limits plus lightweight live usage from Docker; show unavailable data honestly rather than invented zeros.
 - [ ] Validate CPU/RAM changes against Docker-reported capacity, persist only `ORACLE_CPUS` and `ORACLE_MEMORY`, preserve unrelated `.env` values and credentials, and verify Docker's effective limits after application.
-- [ ] Require explicit confirmation before recreating/restarting a running Oracle container. Never change Oracle SGA/PGA/MEMORY parameters, global Docker Desktop/WSL settings, or persistent volumes.
+- [x] Apply supported CPU/RAM updates live through Docker's container-update endpoint. If a future change requires interruption, require explicit confirmation first. Never change Oracle SGA/PGA/MEMORY parameters, global Docker Desktop/WSL settings, or persistent volumes.
 
 **Exit condition:** A first-time student can follow README without building scripts, installing programming toolchains, or knowing Oracle internals beforehand. If downloading licensed Oracle software requires extra action, explain it instead of hiding it.
 
@@ -258,16 +260,16 @@ No custom DBA interface. Validate the Oracle tools directly.
 - [ ] Linux AMD64 + Docker Engine: same.
 - [ ] Intel macOS + Docker Desktop: same (if test hardware available).
 - [ ] Apple Silicon macOS: verify native ARM64 Oracle 19c option and real startup/tooling, **or explicitly label `NOT TESTED`/`BLOCKED` with the reason**. Do not conflate x86 emulation with native support.
-- [ ] Confirm Docker Compose configuration via `docker compose config`, checking no secrets are printed in CI/log outputs.
+- [ ] Confirm the typed Engine API container specification against the selected image, checking that no secrets are printed in CI/log outputs.
 - [ ] Confirm `.env`, Oracle data/backup contents and proprietary binaries cannot be accidentally committed.
 - [ ] Review README from a new-user perspective: no hidden commands, assumed paths, obsolete tags, unknown permissions or misleading “works on everything” claims.
 - [ ] Include a very short troubleshooting section: image pull/registry terms, startup not ready, ORA connection errors, SHM/memory failures, Linux volume permissions, Apple Silicon image mismatch, full backup volume, Docker project/volume mismatch.
 
 **Exit condition:** Published compatibility table explicitly distinguishes tested platforms from targets awaiting validation. Documentation is reproducible and makes no unverifiable performance or support promises.
 
-## 7. `compose.yaml` requirements (implementation contract)
+## 7. Docker Engine API container requirements (implementation contract)
 
-The agent should implement the simplest valid Compose configuration meeting these conditions:
+OraLab should implement the simplest valid direct container configuration meeting these conditions:
 
 1. Exactly **one Oracle database service**.
 2. Image is explicitly configurable and 19c-specific; no silent upgrade to another major version.
@@ -278,7 +280,8 @@ The agent should implement the simplest valid Compose configuration meeting thes
 7. Configurable `shm_size`, sensible validated memory/CPU constraints, and adequate shutdown grace period.
 8. No unnecessary Linux capabilities or `privileged: true` by default.
 9. Robust, image-supported readiness strategy; start/stop that does not erase data.
-10. No additional service, general-purpose frontend, schema initialization scripts, exercise folders or synthetic data creation. The embedded `oralab ui` host utility is allowed and is not a Compose service.
+10. No additional container, general-purpose frontend, schema initialization scripts, exercise folders or synthetic data creation. The embedded `oralab ui` host utility is allowed and is not a container.
+11. Use the supported `github.com/moby/moby/client` and `github.com/moby/moby/api` modules with API negotiation; do not parse Docker CLI text or shell out to Compose.
 
 **Design trade-off:** Native DBA tools require administrative freedom **inside the disposable Oracle container**. Do not achieve this by granting unsafe unrestricted access to the host. Explain differences between Oracle SYSDBA rights and host root/admin rights.
 
@@ -307,7 +310,7 @@ Must answer, in this order:
 1. What this is (genuine terminal Oracle 19c DBA environment) and what it is not (not a web application).
 2. Actual host prerequisites and edition/architecture caveats.
 3. How to get the official image lawfully and accept registry terms where applicable.
-4. Two-to-five concise steps to configure and start using OraLab and its underlying Docker Compose environment (plus unavoidable official Oracle image acquisition).
+4. Two-to-five concise steps to configure and start using OraLab through Docker Engine (plus unavoidable official Oracle image acquisition).
 5. How to know when Oracle is ready.
 6. How to open the optional localhost resource UI and how to connect as SYSDBA and open shell/RMAN/listener utilities.
 7. How to stop/restart **without losing data**.
@@ -320,7 +323,7 @@ A **tool access reference**, not a workbook. Include how to launch SQL*Plus, RMA
 
 ### `docs/persistence.md`
 
-Explain exactly which volumes are attached where, the difference between stop/down/recreate/delete volumes, how backups remain available, and any mutable config exceptions. State clearly that named volumes are not a substitute for RMAN backup and off-host backup for important work.
+Explain exactly which volumes are attached where, the difference between stop/recreate/delete-container/delete-volume operations, how backups remain available, and any mutable config exceptions. State clearly that named volumes are not a substitute for RMAN backup and off-host backup for important work.
 
 ### `docs/compatibility.md`
 
@@ -334,7 +337,7 @@ V1 is **DONE** only when the following are satisfied on every platform marked su
 - [ ] The same OraLab command names and behavior work on every platform marked supported; platform-specific binaries are built from the same source and require no language runtime.
 - [ ] `oralab exec --` runs native Oracle commands without renaming or imitating them.
 - [ ] `oralab ui` binds only to localhost, works without external services, reports real Docker state, and provides no SQL editor, web terminal or arbitrary-command endpoint.
-- [ ] CPU/RAM changes require valid local Docker capacity, preserve unrelated configuration and volumes, request confirmation before interruption, and are reported successful only after effective limits are verified.
+- [ ] CPU/RAM changes require valid local Docker capacity, preserve unrelated configuration and volumes, use live Engine updates when supported, request confirmation before any interruption, and are reported successful only after effective limits are verified.
 - [ ] Exact **Oracle Database 19c** version and edition verified via the running database.
 - [ ] Actual readiness is observable, not guessed by a fixed wait.
 - [ ] User can enter the Linux container shell from terminal.
@@ -356,8 +359,8 @@ V1 is **DONE** only when the following are satisfied on every platform marked su
 
 1. **Keep scope exactly V1.** Never add exercises, datasets, sample schemas, dashboards, frontend, backend, or nonessential tools.
 2. **Research and verify before assuming.** Use official Oracle documentation and inspect the real image when available. Source and record architecture/version/volume/variable details.
-3. **Implement in order:** image compatibility → minimal Compose → CLI access → persistence and backups → resource config → cross-platform validation → concise documentation.
-4. **Prefer fewer files and fewer commands.** OraLab is a thin lifecycle interface, not a replacement for Docker Compose or Oracle utilities. The project should be understandable to a student who knows little Docker.
+3. **Implement in order:** image compatibility → minimal Engine API container specification → CLI access → persistence and backups → resource config → cross-platform validation → concise documentation.
+4. **Prefer fewer files and fewer commands.** OraLab is a thin lifecycle interface over Docker Engine, not a replacement for Docker or Oracle utilities. The project should be understandable to a student who knows little Docker.
 5. **Never silently delete data.** Treat student data and named Docker volumes as important. Any validation that creates/deletes Oracle objects must use clearly isolated temporary test objects/volumes on the agent's own instance, without shipping them as product data.
 6. **Report exactly what you actually tested.** If Oracle binaries, registry access, licensing acceptance, Docker runtime or a host OS are unavailable, do the configuration/documentation work you can and explicitly mark validation as `NOT TESTED` or `BLOCKED`. Do not fake test output or claim cross-platform compatibility based only on syntactic YAML validation.
 7. **Do not switch Oracle version as a shortcut.** Ask the project owner before changing the explicit Oracle 19c requirement.

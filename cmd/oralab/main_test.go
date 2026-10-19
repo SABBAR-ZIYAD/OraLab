@@ -2,52 +2,31 @@ package main
 
 import (
 	"bytes"
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
 
-type recordedCommand struct {
-	name string
-	args []string
-}
-
-type fakeRunner struct {
-	commands []recordedCommand
-	lookErr  error
-	runErr   error
-}
-
-func (f *fakeRunner) LookPath(string) (string, error) {
-	return "docker", f.lookErr
-}
-
-func (f *fakeRunner) Run(name string, args []string, _ io.Reader, _, _ io.Writer) error {
-	copyArgs := append([]string(nil), args...)
-	f.commands = append(f.commands, recordedCommand{name: name, args: copyArgs})
-	return f.runErr
-}
-
-func testApp(root string, runner commandRunner) (app, *bytes.Buffer, *bytes.Buffer) {
+func testApp(root string, engine dockerEngine) (app, *bytes.Buffer, *bytes.Buffer) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	return app{
-		runner: runner,
 		stdin:  bytes.NewBuffer(nil),
 		stdout: stdout,
 		stderr: stderr,
 		getwd:  func() (string, error) { return root, nil },
 		getenv: func(string) string { return "" },
+		newEngine: func() (dockerEngine, error) {
+			return engine, nil
+		},
 	}, stdout, stderr
 }
 
 func projectFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, composeFileName), []byte("services: {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, environmentSample), []byte("ORACLE_IMAGE=\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return root
@@ -55,47 +34,53 @@ func projectFixture(t *testing.T) string {
 
 func TestExecPreservesNativeOracleArguments(t *testing.T) {
 	root := projectFixture(t)
-	runner := &fakeRunner{}
-	a, _, stderr := testApp(root, runner)
+	engine := &fakeEngine{}
+	a, _, stderr := testApp(root, engine)
 
 	if code := a.run([]string{"exec", "--", "sqlplus", "/", "as", "sysdba"}); code != 0 {
 		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
 	}
-	if len(runner.commands) != 1 {
-		t.Fatalf("got %d commands", len(runner.commands))
-	}
-	wantSuffix := []string{"exec", serviceName, "sqlplus", "/", "as", "sysdba"}
-	got := runner.commands[0].args
-	if !reflect.DeepEqual(got[len(got)-len(wantSuffix):], wantSuffix) {
-		t.Fatalf("command suffix = %#v, want %#v", got, wantSuffix)
+	want := []string{"sqlplus", "/", "as", "sysdba"}
+	if !reflect.DeepEqual(engine.execCommand, want) {
+		t.Fatalf("command = %#v, want %#v", engine.execCommand, want)
 	}
 }
 
-func TestUpUsesReadinessWait(t *testing.T) {
+func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 	root := projectFixture(t)
-	runner := &fakeRunner{}
-	a, _, stderr := testApp(root, runner)
+	contents := "ORACLE_IMAGE=registry.example/oracle:19c\nORACLE_PWD=secret\nORACLE_CPUS=4\nORACLE_MEMORY=6g\nORACLE_SHM_SIZE=2g\n"
+	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{
+		info:       engineInfo{CPUs: 8, MemoryBytes: 10 * 1024 * 1024 * 1024},
+		inspectErr: errDockerObjectNotFound,
+	}
+	a, _, stderr := testApp(root, engine)
 
 	if code := a.run([]string{"up", "--timeout", "900"}); code != 0 {
 		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
 	}
-	wantSuffix := []string{"up", "-d", "--wait", "--wait-timeout", "900", serviceName}
-	got := runner.commands[0].args
-	if !reflect.DeepEqual(got[len(got)-len(wantSuffix):], wantSuffix) {
-		t.Fatalf("command suffix = %#v, want %#v", got, wantSuffix)
+	if engine.ensureImage != "registry.example/oracle:19c" {
+		t.Fatalf("image = %q", engine.ensureImage)
+	}
+	if engine.createSpec.Name != oracleContainerName || engine.createSpec.HostIP != "127.0.0.1" {
+		t.Fatalf("container spec = %#v", engine.createSpec)
+	}
+	if engine.createSpec.VolumeName != oracleVolumeName || engine.createSpec.VolumePath != oracleDataPath {
+		t.Fatalf("volume spec = %#v", engine.createSpec)
+	}
+	if engine.startCalls != 1 {
+		t.Fatalf("start calls = %d", engine.startCalls)
 	}
 }
 
 func TestSetupNeverOverwritesEnvironment(t *testing.T) {
 	root := projectFixture(t)
-	if err := os.WriteFile(filepath.Join(root, environmentSample), []byte("EXAMPLE=yes\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte("KEEP=yes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a, _, _ := testApp(root, &fakeRunner{})
-
+	a, _, _ := testApp(root, &fakeEngine{})
 	if code := a.run([]string{"setup"}); code == 0 {
 		t.Fatal("setup unexpectedly overwrote .env")
 	}
@@ -108,27 +93,28 @@ func TestSetupNeverOverwritesEnvironment(t *testing.T) {
 	}
 }
 
-func TestMissingComposeFailsWithoutCallingDocker(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "PROJECT_PLAN.md"), []byte("# plan\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runner := &fakeRunner{}
-	a, _, _ := testApp(root, runner)
-
-	if code := a.run([]string{"status"}); code == 0 {
-		t.Fatal("status succeeded without compose.yaml")
-	}
-	if len(runner.commands) != 0 {
-		t.Fatalf("Docker was called: %#v", runner.commands)
+func TestProjectDoesNotRequireComposeFile(t *testing.T) {
+	root := projectFixture(t)
+	if !isProjectDirectory(root) {
+		t.Fatal("project with .env.example was not detected")
 	}
 }
 
-func TestRunnerFailureProducesFailureExitCode(t *testing.T) {
+func TestRemoteEngineMutationIsRejected(t *testing.T) {
 	root := projectFixture(t)
-	runner := &fakeRunner{runErr: errors.New("unavailable")}
-	a, _, _ := testApp(root, runner)
-	if code := a.run([]string{"status"}); code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	engine := &fakeEngine{endpoint: "tcp://remote.example:2376"}
+	a, _, _ := testApp(root, engine)
+	if code := a.run([]string{"stop"}); code == 0 {
+		t.Fatal("remote Docker mutation was accepted")
+	}
+	if engine.stopTimeout != 0 {
+		t.Fatal("remote engine received a stop request")
+	}
+}
+
+func TestParseLogOptions(t *testing.T) {
+	options, ok := parseLogOptions([]string{"--no-follow", "--tail", "200", "--since", "10m", "--timestamps"})
+	if !ok || options.Follow || options.Tail != "200" || options.Since != "10m" || !options.Timestamps {
+		t.Fatalf("options = %#v, ok=%v", options, ok)
 	}
 }

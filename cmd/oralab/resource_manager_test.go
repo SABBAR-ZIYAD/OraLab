@@ -9,21 +9,6 @@ import (
 	"testing"
 )
 
-type scriptedDockerRunner struct {
-	outputs map[string]string
-	errors  map[string]error
-	lookErr error
-}
-
-func (r *scriptedDockerRunner) LookPath(string) (string, error) {
-	return "docker", r.lookErr
-}
-
-func (r *scriptedDockerRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	key := name + " " + strings.Join(args, " ")
-	return []byte(r.outputs[key]), r.errors[key]
-}
-
 func TestUpdateResourceSettingsPreservesUnrelatedConfiguration(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, environmentFile)
@@ -31,7 +16,6 @@ func TestUpdateResourceSettingsPreservesUnrelatedConfiguration(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := updateResourceSettings(path, 4, "8g"); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +43,6 @@ func TestUpdateResourceSettingsRejectsDuplicateManagedKey(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := updateResourceSettings(path, 4, "8g"); err == nil {
 		t.Fatal("duplicate managed key was accepted")
 	}
@@ -90,25 +73,25 @@ func TestParseByteSize(t *testing.T) {
 	}
 }
 
-func TestManagerReadsRealDockerResponses(t *testing.T) {
+func TestManagerReadsTypedEngineResponses(t *testing.T) {
 	root := projectFixture(t)
 	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte("ORACLE_CPUS=4\nORACLE_MEMORY=6g\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	containerID := "1234567890abcdef"
-	composePrefix := "docker compose --project-directory " + root + " --file " + filepath.Join(root, composeFileName) + " "
-	runner := &scriptedDockerRunner{outputs: map[string]string{
-		"docker context show":                                         "default\n",
-		"docker context inspect default":                              `[{"Endpoints":{"docker":{"Host":"npipe:////./pipe/docker_engine"}}}]`,
-		"docker info --format {{json .}}":                             `{"Name":"desktop","OperatingSystem":"Docker Desktop","ServerVersion":"29.0","NCPU":8,"MemTotal":10737418240}`,
-		composePrefix + "config --services":                           "oracle\n",
-		composePrefix + "ps -q oracle":                                containerID + "\n",
-		"docker inspect " + containerID:                               `[{"State":{"Status":"running","Running":true,"Restarting":false,"ExitCode":0,"Health":{"Status":"healthy"}},"HostConfig":{"NanoCpus":4000000000,"Memory":6442450944},"Mounts":[{"Type":"volume","Name":"oradata","Source":"/var/lib/docker/volumes/oradata","Destination":"/opt/oracle/oradata"}]}]`,
-		"docker stats --no-stream --format {{json .}} " + containerID: `{"CPUPerc":"23.5%","MemUsage":"3.5GiB / 6GiB"}`,
-	}, errors: map[string]error{}}
-
-	state := newResourceManager(root, runner).state(context.Background())
-	if !state.Docker.Reachable || !state.Docker.LocalContext {
+	engine := &fakeEngine{
+		info: engineInfo{
+			Name: "desktop", OperatingSystem: "Docker Desktop", ServerVersion: "29.0",
+			CPUs: 8, MemoryBytes: 10 * 1024 * 1024 * 1024,
+		},
+		container: engineContainer{
+			ID: "1234567890abcdef", Managed: true, Running: true, Status: "running",
+			HealthConfigured: true, Health: "healthy", CPUs: 4, MemoryBytes: 6 * 1024 * 1024 * 1024,
+			Mounts: []engineMount{{Type: "volume", Name: oracleVolumeName, Destination: oracleDataPath}},
+		},
+		stats: engineStats{CPUPercent: 23.5, MemoryUsedBytes: 3 * 1024 * 1024 * 1024},
+	}
+	state := newResourceManager(root, engine, nil).state(context.Background())
+	if !state.Docker.Reachable || !state.Docker.LocalContext || !state.Docker.APIAvailable {
 		t.Fatalf("Docker state = %#v", state.Docker)
 	}
 	if state.Oracle.Readiness != "ready" || !state.Oracle.Running {
@@ -120,12 +103,33 @@ func TestManagerReadsRealDockerResponses(t *testing.T) {
 	if !state.Resources.StatsAvailable || state.Resources.CPUPercent != 23.5 {
 		t.Fatalf("statistics = %#v", state.Resources)
 	}
-	if len(state.Storage) != 1 || state.Storage[0].Destination != "/opt/oracle/oradata" {
+	if len(state.Storage) != 1 || state.Storage[0].Destination != oracleDataPath {
 		t.Fatalf("storage = %#v", state.Storage)
 	}
 }
 
-func TestRemoteDockerContextIsNotLocal(t *testing.T) {
+func TestResourceChangeUsesLiveEngineUpdate(t *testing.T) {
+	root := projectFixture(t)
+	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte("ORACLE_CPUS=2\nORACLE_MEMORY=4g\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{
+		info: engineInfo{CPUs: 8, MemoryBytes: 16 * 1024 * 1024 * 1024},
+		container: engineContainer{
+			ID: "id", Managed: true, Running: true, Status: "running",
+			HealthConfigured: true, Health: "healthy", CPUs: 2, MemoryBytes: 4 * 1024 * 1024 * 1024,
+		},
+	}
+	result := newResourceManager(root, engine, nil).apply(context.Background(), applyRequest{CPUs: 4, MemoryGiB: 6})
+	if !result.OK || !result.Applied {
+		t.Fatalf("result = %#v", result)
+	}
+	if engine.updateCPUs != 4 || engine.updateMemory != 6*1024*1024*1024 {
+		t.Fatalf("update = %d CPUs, %d bytes", engine.updateCPUs, engine.updateMemory)
+	}
+}
+
+func TestRemoteDockerEndpointIsNotLocal(t *testing.T) {
 	if isLocalDockerEndpoint("tcp://remote.example:2376") {
 		t.Fatal("remote TCP Docker endpoint was treated as local")
 	}
@@ -135,12 +139,25 @@ func TestRemoteDockerContextIsNotLocal(t *testing.T) {
 	if !isLocalDockerEndpoint("npipe:////./pipe/docker_engine") {
 		t.Fatal("local Windows Docker endpoint was rejected")
 	}
+	if !isLocalDockerEndpoint("tcp://127.0.0.1:2375") {
+		t.Fatal("loopback TCP Docker endpoint was rejected")
+	}
 }
 
-func TestMissingDockerIsReportedWithoutCommands(t *testing.T) {
-	runner := &scriptedDockerRunner{outputs: map[string]string{}, errors: map[string]error{}, lookErr: errors.New("not found")}
-	state := newResourceManager(t.TempDir(), runner).state(context.Background())
-	if state.Docker.CLIAvailable || state.Docker.Error == "" {
+func TestMissingEngineIsReported(t *testing.T) {
+	state := newResourceManager(t.TempDir(), nil, errors.New("unavailable")).state(context.Background())
+	if state.Docker.APIAvailable || state.Docker.Error == "" {
 		t.Fatalf("Docker state = %#v", state.Docker)
+	}
+}
+
+func TestCopyDockerStreamDemultiplexesOutput(t *testing.T) {
+	input := append(multiplex(1, "out"), multiplex(2, "err")...)
+	var stdout, stderr strings.Builder
+	if err := copyDockerStream(&stdout, &stderr, strings.NewReader(string(input)), false); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "out" || stderr.String() != "err" {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

@@ -55,7 +55,11 @@ func (a app) ui(root string, args []string) int {
 		fmt.Fprintf(a.stderr, "oralab: load UI assets: %v\n", err)
 		return 1
 	}
-	manager := newResourceManager(root, systemDockerRunner{})
+	engine, engineErr := a.newEngine()
+	if engine != nil {
+		defer engine.Close()
+	}
+	manager := newResourceManager(root, engine, engineErr)
 	handler := &uiHandler{
 		manager: manager,
 		csrf:    csrf,
@@ -137,9 +141,7 @@ func (h *uiHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		}
 		result := h.manager.apply(request.Context(), payload)
 		status := http.StatusOK
-		if result.RequiresRestart {
-			status = http.StatusConflict
-		} else if !result.OK {
+		if !result.OK {
 			status = http.StatusBadRequest
 		}
 		h.writeJSON(writer, status, result)

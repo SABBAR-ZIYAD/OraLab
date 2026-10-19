@@ -150,10 +150,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 footer { padding: 26px 4px 0; color: var(--muted); font-size: .82rem; text-align: center; }
 code { padding: 2px 5px; border-radius: 4px; background: #e7e1d6; color: #4f4942; }
 
-dialog { width: min(480px, calc(100% - 32px)); border: 1px solid var(--line); border-radius: 16px; padding: 26px; background: var(--surface); color: var(--ink); box-shadow: 0 28px 80px rgb(25 20 15 / 24%); }
-dialog::backdrop { background: rgb(27 24 20 / 45%); backdrop-filter: blur(3px); }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
-
 @media (max-width: 780px) {
   .shell { width: min(100% - 24px, 680px); padding-top: 28px; }
   .masthead { display: block; }

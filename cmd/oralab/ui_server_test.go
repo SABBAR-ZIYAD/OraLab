@@ -84,7 +84,7 @@ func TestUIRejectsUntrustedHost(t *testing.T) {
 func TestMutationRequiresOriginCookieAndCSRFHeader(t *testing.T) {
 	manager := &fakeManagerOperations{applyResult: operationResult{OK: true}}
 	handler := testUIHandler(t, manager)
-	body := `{"cpus":4,"memory_gib":6,"confirm_restart":false}`
+	body := `{"cpus":4,"memory_gib":6}`
 
 	unauthorized := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/api/apply", strings.NewReader(body))
 	unauthorized.Host = "127.0.0.1:8765"

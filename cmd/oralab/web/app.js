@@ -11,8 +11,7 @@
     apply: $("apply-button"), form: $("resource-form"), refresh: $("refresh-button"),
     start: $("start-button"), stop: $("stop-button"), restart: $("restart-button"),
     cpuUsage: $("cpu-usage-value"), memoryUsage: $("memory-usage-value"), cpuMeter: $("cpu-meter"),
-    memoryMeter: $("memory-meter"), statsTime: $("stats-time"), storage: $("storage-list"),
-    dialog: $("restart-dialog"), restartSummary: $("restart-summary")
+    memoryMeter: $("memory-meter"), statsTime: $("stats-time"), storage: $("storage-list")
   };
 
   let currentState = null;
@@ -162,18 +161,12 @@
     return { response, result };
   }
 
-  async function applyResources(confirmRestart = false) {
+  async function applyResources() {
     const cpus = Number.parseInt(elements.cpuNumber.value, 10);
     const memory = Number.parseInt(elements.memoryNumber.value, 10);
-    setBusy(true, confirmRestart ? "Applying limits and restarting Oracle…" : "Validating resource limits…");
+    setBusy(true, "Applying resource limits through Docker Engine…");
     try {
-      const { response, result } = await post("/api/apply", { cpus, memory_gib: memory, confirm_restart: confirmRestart });
-      if (response.status === 409 && result.requires_restart) {
-        setBusy(false, "");
-        elements.restartSummary.textContent = `CPU: ${currentState.resources.configured_cpus || "not set"} → ${cpus}; Memory: ${formatBytes(currentState.resources.configured_memory_bytes)} → ${memory} GiB.`;
-        elements.dialog.showModal();
-        return;
-      }
+      const { result } = await post("/api/apply", { cpus, memory_gib: memory });
       if (result.state) render(result.state);
       setNotice(result.message, result.ok);
     } catch (error) {
@@ -203,15 +196,11 @@
 
   bindPair(elements.cpuRange, elements.cpuNumber);
   bindPair(elements.memoryRange, elements.memoryNumber);
-  elements.form.addEventListener("submit", (event) => { event.preventDefault(); applyResources(false); });
+  elements.form.addEventListener("submit", (event) => { event.preventDefault(); applyResources(); });
   elements.refresh.addEventListener("click", () => readState({ preserveInputs: false }));
   elements.start.addEventListener("click", () => lifecycle("start"));
   elements.stop.addEventListener("click", () => lifecycle("stop"));
   elements.restart.addEventListener("click", () => lifecycle("restart"));
-  elements.dialog.addEventListener("close", () => {
-    if (elements.dialog.returnValue === "confirm") applyResources(true);
-  });
-
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !busy) readState();
   });

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="oralab-csrf" content="__ORALAB_CSRF_TOKEN__">
+    <title>OraLab Resource Manager</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">ORACLE 19c · LOCAL LAB</p>
+          <h1>Resource Manager</h1>
+          <p class="subtitle">Container resources here. Oracle administration stays in your terminal.</p>
+        </div>
+        <div id="overall-status" class="status-chip neutral" aria-live="polite">
+          <span class="status-dot"></span>
+          <span>Checking environment</span>
+        </div>
+      </header>
+
+      <section class="notice" id="notice" aria-live="polite" hidden></section>
+
+      <section class="panel environment-panel" aria-labelledby="environment-title">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">01</p>
+            <h2 id="environment-title">Environment</h2>
+          </div>
+          <button type="button" class="quiet-button" id="refresh-button">Refresh</button>
+        </div>
+        <dl class="environment-grid">
+          <div><dt>Host</dt><dd id="host-value">—</dd></div>
+          <div><dt>Docker</dt><dd id="docker-value">—</dd></div>
+          <div><dt>Oracle container</dt><dd id="oracle-value">—</dd></div>
+          <div><dt>Database</dt><dd id="database-value">—</dd></div>
+        </dl>
+        <div class="lifecycle-actions" aria-label="Oracle lifecycle controls">
+          <button type="button" class="secondary-button" id="start-button">Start Oracle</button>
+          <button type="button" class="secondary-button" id="stop-button">Stop Oracle</button>
+          <button type="button" class="secondary-button" id="restart-button">Restart Oracle</button>
+        </div>
+      </section>
+
+      <div class="two-column">
+        <section class="panel" aria-labelledby="resources-title">
+          <div class="panel-heading">
+            <div>
+              <p class="section-number">02</p>
+              <h2 id="resources-title">Resource limits</h2>
+            </div>
+            <p class="capacity" id="capacity-value">Docker capacity unavailable</p>
+          </div>
+
+          <form id="resource-form">
+            <div class="control-group">
+              <div class="control-label">
+                <label for="cpu-input">CPU limit</label>
+                <output id="cpu-output" for="cpu-input">—</output>
+              </div>
+              <input id="cpu-input" name="cpus" type="range" min="1" max="1" step="1" disabled>
+              <div class="input-row">
+                <input id="cpu-number" type="number" min="1" step="1" inputmode="numeric" aria-label="CPU limit as a whole number" disabled>
+                <span>CPUs</span>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <div class="control-label">
+                <label for="memory-input">Memory limit</label>
+                <output id="memory-output" for="memory-input">—</output>
+              </div>
+              <input id="memory-input" name="memory" type="range" min="1" max="1" step="1" disabled>
+              <div class="input-row">
+                <input id="memory-number" type="number" min="1" step="1" inputmode="numeric" aria-label="Memory limit in GiB" disabled>
+                <span>GiB</span>
+              </div>
+            </div>
+
+            <p class="constraint-note">These controls change only Docker container limits. OraLab never changes SGA, PGA, MEMORY_TARGET, or host-wide Docker settings.</p>
+            <button type="submit" class="primary-button" id="apply-button" disabled>Apply changes</button>
+          </form>
+        </section>
+
+        <section class="panel" aria-labelledby="usage-title">
+          <div class="panel-heading">
+            <div>
+              <p class="section-number">03</p>
+              <h2 id="usage-title">Current usage</h2>
+            </div>
+            <p class="capacity" id="stats-time">Not available</p>
+          </div>
+          <div class="meter-group">
+            <div class="meter-heading"><span>CPU</span><strong id="cpu-usage-value">—</strong></div>
+            <div class="meter"><span id="cpu-meter"></span></div>
+          </div>
+          <div class="meter-group">
+            <div class="meter-heading"><span>Memory</span><strong id="memory-usage-value">—</strong></div>
+            <div class="meter"><span id="memory-meter"></span></div>
+          </div>
+
+          <div class="storage-block">
+            <h3>Persistent mounts</h3>
+            <ul id="storage-list"><li>Waiting for Docker configuration</li></ul>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        <p>Use <code>oralab shell</code>, then run <code>sqlplus / as sysdba</code>, <code>rman target /</code>, and other native Oracle commands unchanged.</p>
+      </footer>
+    </main>
+
+    <dialog id="restart-dialog">
+      <form method="dialog">
+        <p class="eyebrow">CONFIRM INTERRUPTION</p>
+        <h2>Apply and restart Oracle?</h2>
+        <p id="restart-summary"></p>
+        <p>Your persistent database volumes will not be removed.</p>
+        <div class="dialog-actions">
+          <button value="cancel" class="quiet-button">Cancel</button>
+          <button value="confirm" class="primary-button">Apply and restart</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

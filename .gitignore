@@ -1,0 +1,14 @@
+# Local configuration and secrets
+.env
+
+# OraLab build output
+/dist/
+/oralab
+/oralab.exe
+
+# Oracle installation media, archives and local data
+*.zip
+*.tar
+*.tar.gz
+oradata/
+backups/

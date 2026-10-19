@@ -2,8 +2,6 @@
 
 **Run an Oracle Database 19c lab with one cross-platform command and manage its local resources from your browser.**
 
-[![OraLab CLI](https://github.com/SABBAR-ZIYAD/OraLab/actions/workflows/oralab.yml/badge.svg)](https://github.com/SABBAR-ZIYAD/OraLab/actions/workflows/oralab.yml)
-
 OraLab is a lightweight command-line wrapper around the Docker Engine API. It gives Windows, Linux, and macOS users the same commands for creating, starting, stopping, inspecting, and entering a local Oracle 19c container.
 
 OraLab does not replace Oracle's tools. Inside the container, `sqlplus`, `rman`, `lsnrctl`, `expdp`, and `impdp` work with their normal Oracle syntax.
@@ -65,8 +63,6 @@ To make it available system-wide:
 sudo install -m 0755 oralab /usr/local/bin/oralab
 oralab version
 ```
-
-Future tagged releases are configured to provide standalone binaries for Windows AMD64, Linux AMD64/ARM64, and macOS Intel/Apple Silicon.
 
 ## Quick start
 
@@ -412,12 +408,6 @@ When Node.js is installed, validate the embedded browser JavaScript with:
 node --check cmd/oralab/web/app.js
 ```
 
-GitHub Actions runs the test and static-analysis suite and builds:
-
-- Windows AMD64
-- Linux AMD64 and ARM64
-- macOS AMD64 and ARM64
-
 ## Current project status
 
 Implemented and covered by automated tests:
@@ -428,7 +418,7 @@ Implemented and covered by automated tests:
 - Image pull authentication, container logs, exec, and native exit statuses.
 - Embedded localhost Resource Manager and live CPU/RAM updates.
 - Persistent volume handling and non-destructive lifecycle commands.
-- Cross-platform builds in CI.
+- Source builds for Windows, Linux, and macOS.
 
 Still required before OraLab can advertise a complete, ready-to-run Oracle 19c environment:
 
@@ -436,8 +426,6 @@ Still required before OraLab can advertise a complete, ready-to-run Oracle 19c e
 - Validate the container environment, port, data path, and inherited healthcheck against that exact image.
 - Test initialization, persistence, restart, SQL\*Plus, RMAN, listener, Data Pump, and recovery workflows.
 - Complete runtime testing on each supported host platform.
-
-Follow the detailed acceptance criteria in [PROJECT_PLAN.md](PROJECT_PLAN.md). A compact behavioral reference is available in [docs/oralab.md](docs/oralab.md).
 
 ## Contributing
 

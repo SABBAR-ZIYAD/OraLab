@@ -18,18 +18,19 @@ import (
 )
 
 const (
-	cpuSettingKey       = "ORACLE_CPUS"
-	memorySettingKey    = "ORACLE_MEMORY"
-	shmSettingKey       = "ORACLE_SHM_SIZE"
-	imageSettingKey     = "ORACLE_IMAGE"
-	passwordSettingKey  = "ORACLE_PWD"
-	managedLabel        = "dev.oralab.managed"
-	oracleContainerName = "oralab-oracle"
-	oracleVolumeName    = "oralab-oradata"
-	oracleDataPath      = "/opt/oracle/oradata"
-	oracleListenerPort  = "1521"
-	operationTimeout    = 31 * time.Minute
-	stateTimeout        = 12 * time.Second
+	cpuSettingKey         = "ORACLE_CPUS"
+	memorySettingKey      = "ORACLE_MEMORY"
+	shmSettingKey         = "ORACLE_SHM_SIZE"
+	passwordSettingKey    = "ORACLE_PWD"
+	defaultOracleRegistry = "container-registry.oracle.com"
+	defaultOracleImage    = defaultOracleRegistry + "/database/enterprise:19.3.0.0"
+	managedLabel          = "dev.oralab.managed"
+	oracleContainerName   = "oralab-oracle"
+	oracleVolumeName      = "oralab-oradata"
+	oracleDataPath        = "/opt/oracle/oradata"
+	oracleListenerPort    = "1521"
+	operationTimeout      = 31 * time.Minute
+	stateTimeout          = 12 * time.Second
 )
 
 type hostState struct {
@@ -107,7 +108,6 @@ type lifecycleRequest struct {
 }
 
 type labConfig struct {
-	Image       string
 	Password    string
 	CPUs        int
 	MemoryBytes int64
@@ -330,21 +330,18 @@ func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string
 	if err != nil {
 		return engineContainer{}, err
 	}
-	if config.Image == "" {
-		return engineContainer{}, errors.New("ORACLE_IMAGE is empty; select the validated Oracle 19c image first")
-	}
 	if config.Password == "" {
 		return engineContainer{}, errors.New("ORACLE_PWD is empty")
 	}
 	if config.CPUs <= 0 || config.MemoryBytes <= 0 {
 		return engineContainer{}, errors.New("ORACLE_CPUS and ORACLE_MEMORY must be configured before creating Oracle")
 	}
-	if err := engine.EnsureImage(ctx, config.Image); err != nil {
+	if err := engine.EnsureImage(ctx, defaultOracleImage); err != nil {
 		return engineContainer{}, fmt.Errorf("make Oracle image available: %w", err)
 	}
 	_, err = engine.CreateContainer(ctx, engineContainerSpec{
-		Name: oracleContainerName, Image: config.Image,
-		Environment: []string{passwordSettingKey + "=" + config.Password},
+		Name: oracleContainerName, Image: defaultOracleImage,
+		Environment: []string{passwordSettingKey + "=" + config.Password, "ORACLE_EDITION=enterprise"},
 		CPUs:        config.CPUs, MemoryBytes: config.MemoryBytes, ShmBytes: config.ShmBytes,
 		StopTimeout: defaultStop, VolumeName: oracleVolumeName, VolumePath: oracleDataPath,
 		HostIP: "127.0.0.1", HostPort: oracleListenerPort, TargetPort: oracleListenerPort + "/tcp",
@@ -385,7 +382,7 @@ func readLabConfig(path string) (labConfig, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return labConfig{}, errors.New(".env is missing; run oralab setup first")
+			return labConfig{}, errors.New(".env is missing; run oralab init first")
 		}
 		return labConfig{}, err
 	}
@@ -393,7 +390,7 @@ func readLabConfig(path string) (labConfig, error) {
 	if err != nil {
 		return labConfig{}, err
 	}
-	config := labConfig{Image: strings.TrimSpace(values[imageSettingKey]), Password: values[passwordSettingKey]}
+	config := labConfig{Password: values[passwordSettingKey]}
 	if value := strings.TrimSpace(values[cpuSettingKey]); value != "" {
 		config.CPUs, err = strconv.Atoi(value)
 		if err != nil || config.CPUs <= 0 {
@@ -424,6 +421,27 @@ func readResourceSettings(path string) (int, int64, error) {
 	return config.CPUs, config.MemoryBytes, err
 }
 
+func createLabConfig(path, password string, options initOptions) error {
+	contents := fmt.Sprintf("# Created by OraLab. The Oracle 19c Enterprise image is managed by OraLab.\nORACLE_PWD=%s\nORACLE_CPUS=%d\nORACLE_MEMORY=%s\nORACLE_SHM_SIZE=%s\n", password, options.CPUs, options.Memory, options.Shm)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return errors.New("refusing to overwrite existing .env")
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(contents); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
 func parseEnvironment(contents []byte) (map[string]string, error) {
 	values := make(map[string]string)
 	scanner := bufio.NewScanner(bytes.NewReader(contents))
@@ -440,7 +458,11 @@ func parseEnvironment(contents []byte) (map[string]string, error) {
 		if _, duplicate := values[key]; duplicate {
 			return nil, fmt.Errorf("duplicate setting %s", key)
 		}
-		values[key] = strings.Trim(strings.TrimSpace(value), "\"'")
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
+			value = value[1 : len(value)-1]
+		}
+		values[key] = value
 	}
 	return values, scanner.Err()
 }
@@ -449,7 +471,7 @@ func updateResourceSettings(path string, cpus int, memory string) error {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return errors.New(".env is missing; run oralab setup first")
+			return errors.New(".env is missing; run oralab init first")
 		}
 		return err
 	}

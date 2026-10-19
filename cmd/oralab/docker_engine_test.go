@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -125,6 +127,19 @@ func TestRegistryCredentialsAreEncodedFromProcessEnvironment(t *testing.T) {
 	}
 	if encoded == "" || strings.Contains(encoded, "temporary-token") {
 		t.Fatalf("credentials were not safely encoded: %q", encoded)
+	}
+	payload, err := base64.URLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var auth struct {
+		ServerAddress string `json:"serveraddress"`
+	}
+	if err := json.Unmarshal(payload, &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth.ServerAddress != defaultOracleRegistry {
+		t.Fatalf("registry server = %q", auth.ServerAddress)
 	}
 }
 

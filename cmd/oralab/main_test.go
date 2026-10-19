@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -20,13 +21,14 @@ func testApp(root string, engine dockerEngine) (app, *bytes.Buffer, *bytes.Buffe
 		newEngine: func() (dockerEngine, error) {
 			return engine, nil
 		},
+		readPassword: func() (string, error) { return "TestPassword1", nil },
 	}, stdout, stderr
 }
 
 func projectFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, environmentSample), []byte("ORACLE_IMAGE=\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, environmentSample), []byte("ORACLE_PWD=\nORACLE_CPUS=\nORACLE_MEMORY=\nORACLE_SHM_SIZE=\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return root
@@ -48,7 +50,7 @@ func TestExecPreservesNativeOracleArguments(t *testing.T) {
 
 func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 	root := projectFixture(t)
-	contents := "ORACLE_IMAGE=registry.example/oracle:19c\nORACLE_PWD=secret\nORACLE_CPUS=4\nORACLE_MEMORY=6g\nORACLE_SHM_SIZE=2g\n"
+	contents := "ORACLE_PWD=secret\nORACLE_CPUS=4\nORACLE_MEMORY=6g\nORACLE_SHM_SIZE=2g\n"
 	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -61,10 +63,10 @@ func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 	if code := a.run([]string{"up", "--timeout", "900"}); code != 0 {
 		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
 	}
-	if engine.ensureImage != "registry.example/oracle:19c" {
+	if engine.ensureImage != defaultOracleImage {
 		t.Fatalf("image = %q", engine.ensureImage)
 	}
-	if engine.createSpec.Name != oracleContainerName || engine.createSpec.HostIP != "127.0.0.1" {
+	if engine.createSpec.Name != oracleContainerName || engine.createSpec.HostIP != "127.0.0.1" || engine.createSpec.Image != defaultOracleImage {
 		t.Fatalf("container spec = %#v", engine.createSpec)
 	}
 	if engine.createSpec.VolumeName != oracleVolumeName || engine.createSpec.VolumePath != oracleDataPath {
@@ -75,14 +77,66 @@ func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 	}
 }
 
-func TestSetupNeverOverwritesEnvironment(t *testing.T) {
+func TestInitWritesOnlyUserConfigurationAndNeverOverwritesEnvironment(t *testing.T) {
+	root := projectFixture(t)
+	a, _, stderr := testApp(root, &fakeEngine{})
+	if code := a.run([]string{"init", "--cpus", "4", "--memory", "6g", "--shm", "1g"}); code != 0 {
+		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(root, environmentFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# Created by OraLab. The Oracle 19c Enterprise image is managed by OraLab.\nORACLE_PWD=TestPassword1\nORACLE_CPUS=4\nORACLE_MEMORY=6g\nORACLE_SHM_SIZE=1g\n"
+	if string(contents) != want {
+		t.Fatalf(".env = %q, want %q", contents, want)
+	}
+	if strings.Contains(string(contents), "ORACLE_IMAGE") {
+		t.Fatal(".env exposes the managed image")
+	}
+	if code := a.run([]string{"init", "--cpus", "4", "--memory", "6g", "--shm", "1g"}); code == 0 {
+		t.Fatal("init unexpectedly overwrote .env")
+	}
+	if !strings.Contains(stderr.String(), "refusing to overwrite") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestInitReadsPasswordFromStdin(t *testing.T) {
+	root := projectFixture(t)
+	a, _, stderr := testApp(root, &fakeEngine{})
+	a.stdin = strings.NewReader("\ufeffPipedPassword1\n")
+	if code := a.run([]string{"init", "--cpus", "2", "--memory", "4g", "--shm", "1g", "--password-stdin"}); code != 0 {
+		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(root, environmentFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "ORACLE_PWD=PipedPassword1\n") {
+		t.Fatalf(".env does not contain piped password: %q", contents)
+	}
+}
+
+func TestInitRejectsInvalidResourceArguments(t *testing.T) {
+	root := projectFixture(t)
+	a, _, _ := testApp(root, &fakeEngine{})
+	if code := a.run([]string{"init", "--cpus", "4", "--memory", "2g", "--shm", "3g"}); code == 0 {
+		t.Fatal("init accepted shared memory larger than memory")
+	}
+	if _, err := os.Stat(filepath.Join(root, environmentFile)); !os.IsNotExist(err) {
+		t.Fatalf(".env was created after invalid init: %v", err)
+	}
+}
+
+func TestInitNeverOverwritesExistingEnvironment(t *testing.T) {
 	root := projectFixture(t)
 	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte("KEEP=yes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	a, _, _ := testApp(root, &fakeEngine{})
-	if code := a.run([]string{"setup"}); code == 0 {
-		t.Fatal("setup unexpectedly overwrote .env")
+	if code := a.run([]string{"init", "--cpus", "4", "--memory", "6g", "--shm", "1g"}); code == 0 {
+		t.Fatal("init unexpectedly overwrote .env")
 	}
 	contents, err := os.ReadFile(filepath.Join(root, environmentFile))
 	if err != nil {

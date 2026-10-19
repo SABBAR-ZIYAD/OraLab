@@ -26,22 +26,24 @@ var version = "dev"
 type engineFactory func() (dockerEngine, error)
 
 type app struct {
-	stdin     io.Reader
-	stdout    io.Writer
-	stderr    io.Writer
-	getwd     func() (string, error)
-	getenv    func(string) string
-	newEngine engineFactory
+	stdin        io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
+	getwd        func() (string, error)
+	getenv       func(string) string
+	newEngine    engineFactory
+	readPassword func() (string, error)
 }
 
 func main() {
 	a := app{
-		stdin:     os.Stdin,
-		stdout:    os.Stdout,
-		stderr:    os.Stderr,
-		getwd:     os.Getwd,
-		getenv:    os.Getenv,
-		newEngine: newMobyEngine,
+		stdin:        os.Stdin,
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
+		getwd:        os.Getwd,
+		getenv:       os.Getenv,
+		newEngine:    newMobyEngine,
+		readPassword: readPasswordFromTerminal,
 	}
 	os.Exit(a.run(os.Args[1:]))
 }
@@ -75,8 +77,8 @@ func (a app) run(args []string) int {
 	switch command {
 	case "doctor":
 		return a.doctor(root, commandArgs)
-	case "setup":
-		return a.setup(root, commandArgs)
+	case "init", "setup":
+		return a.init(root, commandArgs)
 	case "ui":
 		return a.ui(root, commandArgs)
 	case "up":
@@ -200,7 +202,7 @@ func findProjectDirectory(start string) (string, error) {
 }
 
 func isProjectDirectory(path string) bool {
-	return regularFile(filepath.Join(path, environmentSample)) || regularFile(filepath.Join(path, "PROJECT_PLAN.md"))
+	return regularFile(filepath.Join(path, environmentSample))
 }
 
 func regularFile(path string) bool {
@@ -420,9 +422,7 @@ func (a app) doctor(root string, args []string) int {
 			fmt.Fprintf(a.stderr, "[FAIL] Local .env: %v\n", configErr)
 			failed = true
 		} else {
-			if config.Image == "" {
-				fmt.Fprintln(a.stderr, "[WARN] ORACLE_IMAGE is not configured")
-			}
+			fmt.Fprintf(a.stdout, "[PASS] Oracle image: %s\n", defaultOracleImage)
 			if config.Password == "" {
 				fmt.Fprintln(a.stderr, "[WARN] ORACLE_PWD is not configured")
 			}
@@ -431,7 +431,7 @@ func (a app) doctor(root string, args []string) int {
 			}
 		}
 	} else if regularFile(filepath.Join(root, environmentSample)) {
-		fmt.Fprintln(a.stderr, "[WARN] Local .env is missing; run: oralab setup")
+		fmt.Fprintln(a.stderr, "[WARN] Local .env is missing; run: oralab init --cpus 4 --memory 6g --shm 1g")
 	} else {
 		fmt.Fprintln(a.stderr, "[FAIL] Both .env and .env.example are missing")
 		failed = true
@@ -442,45 +442,128 @@ func (a app) doctor(root string, args []string) int {
 	return 0
 }
 
-func (a app) setup(root string, args []string) int {
-	if len(args) != 0 {
-		fmt.Fprintln(a.stderr, "usage: oralab setup")
+type initOptions struct {
+	CPUs          int
+	Memory        string
+	MemoryBytes   int64
+	Shm           string
+	ShmBytes      int64
+	PasswordStdin bool
+}
+
+func (a app) init(root string, args []string) int {
+	options, err := parseInitOptions(args)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "oralab: %v\n", err)
+		fmt.Fprintln(a.stderr, "usage: oralab init --cpus COUNT --memory SIZE --shm SIZE [--password-stdin]")
 		return 2
 	}
-	source := filepath.Join(root, environmentSample)
-	destination := filepath.Join(root, environmentFile)
-	if !regularFile(source) {
-		fmt.Fprintf(a.stderr, "oralab: %s does not exist\n", source)
-		return 1
-	}
-	input, err := os.Open(source)
+	password, err := a.readInitialPassword(options.PasswordStdin)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "oralab: open %s: %v\n", source, err)
+		fmt.Fprintf(a.stderr, "oralab: read database password: %v\n", err)
 		return 1
 	}
-	defer input.Close()
-	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		fmt.Fprintf(a.stderr, "oralab: refusing to overwrite existing %s\n", destination)
+	if err := createLabConfig(filepath.Join(root, environmentFile), password, options); err != nil {
+		fmt.Fprintf(a.stderr, "oralab: create local configuration: %v\n", err)
 		return 1
 	}
-	if err != nil {
-		fmt.Fprintf(a.stderr, "oralab: create %s: %v\n", destination, err)
-		return 1
-	}
-	_, copyErr := io.Copy(output, input)
-	closeErr := output.Close()
-	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(destination)
-		if copyErr != nil {
-			fmt.Fprintf(a.stderr, "oralab: write %s: %v\n", destination, copyErr)
-		} else {
-			fmt.Fprintf(a.stderr, "oralab: close %s: %v\n", destination, closeErr)
-		}
-		return 1
-	}
-	fmt.Fprintf(a.stdout, "Created %s\nReview its values before running: oralab up\n", destination)
+	fmt.Fprintf(a.stdout, "Created %s for Oracle Database 19c Enterprise.\n", filepath.Join(root, environmentFile))
+	fmt.Fprintln(a.stdout, "Before the first pull, accept Oracle Container Registry terms and provide your registry auth token if requested.")
+	fmt.Fprintln(a.stdout, "Next: oralab up")
 	return 0
+}
+
+func (a app) readInitialPassword(fromStdin bool) (string, error) {
+	if fromStdin {
+		contents, err := io.ReadAll(a.stdin)
+		if err != nil {
+			return "", err
+		}
+		password := strings.TrimPrefix(strings.TrimRight(string(contents), "\r\n"), "\ufeff")
+		return validateInitialPassword(password)
+	}
+	if a.readPassword == nil {
+		return "", errors.New("interactive password input is unavailable; use --password-stdin")
+	}
+	fmt.Fprint(a.stderr, "Oracle database password: ")
+	password, err := a.readPassword()
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprint(a.stderr, "Confirm Oracle database password: ")
+	confirmation, err := a.readPassword()
+	if err != nil {
+		return "", err
+	}
+	if password != confirmation {
+		return "", errors.New("passwords do not match")
+	}
+	return validateInitialPassword(password)
+}
+
+func validateInitialPassword(password string) (string, error) {
+	if strings.TrimSpace(password) == "" {
+		return "", errors.New("password cannot be empty")
+	}
+	if strings.ContainsAny(password, "\r\n") {
+		return "", errors.New("password cannot contain a newline")
+	}
+	return password, nil
+}
+
+func parseInitOptions(args []string) (initOptions, error) {
+	var options initOptions
+	seen := map[string]bool{}
+	for len(args) > 0 {
+		flag := args[0]
+		if flag == "--password-stdin" {
+			if seen[flag] {
+				return initOptions{}, fmt.Errorf("%s cannot be repeated", flag)
+			}
+			options.PasswordStdin = true
+			seen[flag] = true
+			args = args[1:]
+			continue
+		}
+		if len(args) < 2 || seen[flag] {
+			return initOptions{}, fmt.Errorf("invalid init option %q", flag)
+		}
+		value := strings.TrimSpace(args[1])
+		if value == "" {
+			return initOptions{}, fmt.Errorf("%s requires a value", flag)
+		}
+		switch flag {
+		case "--cpus":
+			cpus, err := strconv.Atoi(value)
+			if err != nil || cpus <= 0 || cpus > 1024 {
+				return initOptions{}, errors.New("--cpus must be a positive whole number")
+			}
+			options.CPUs = cpus
+		case "--memory":
+			bytes, err := parseByteSize(value)
+			if err != nil || bytes <= 0 {
+				return initOptions{}, errors.New("--memory must be a positive size such as 6g")
+			}
+			options.Memory, options.MemoryBytes = value, bytes
+		case "--shm":
+			bytes, err := parseByteSize(value)
+			if err != nil || bytes <= 0 {
+				return initOptions{}, errors.New("--shm must be a positive size such as 1g")
+			}
+			options.Shm, options.ShmBytes = value, bytes
+		default:
+			return initOptions{}, fmt.Errorf("unknown init option %q", flag)
+		}
+		seen[flag] = true
+		args = args[2:]
+	}
+	if options.CPUs == 0 || options.Memory == "" || options.Shm == "" {
+		return initOptions{}, errors.New("--cpus, --memory, and --shm are required")
+	}
+	if options.ShmBytes > options.MemoryBytes {
+		return initOptions{}, errors.New("--shm cannot exceed --memory")
+	}
+	return options, nil
 }
 
 func parseTimeout(args []string, fallback int) (int, bool) {
@@ -534,7 +617,8 @@ Usage:
 
 Commands:
   doctor                     Check Docker Engine and project configuration
-  setup                      Create .env safely from .env.example
+	init --cpus N --memory S --shm S [--password-stdin]
+	                           Configure this lab and securely collect its database password
   ui [--port PORT] [--no-open]
                               Open the local CPU/RAM resource manager
   up [--timeout SECONDS]     Create/start Oracle and wait for readiness

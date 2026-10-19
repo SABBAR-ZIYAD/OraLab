@@ -12,7 +12,7 @@ import (
 func TestUpdateResourceSettingsPreservesUnrelatedConfiguration(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, environmentFile)
-	original := "# local settings\nORACLE_IMAGE=registry.example/oracle:19c\nORACLE_PWD=do-not-touch\nORACLE_CPUS=2\nCUSTOM=value\n"
+	original := "# local settings\nLEGACY_NOTE=keep-this-value\nORACLE_PWD=do-not-touch\nORACLE_CPUS=2\nCUSTOM=value\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestUpdateResourceSettingsPreservesUnrelatedConfiguration(t *testing.T) {
 	}
 	text := string(contents)
 	for _, expected := range []string{
-		"ORACLE_IMAGE=registry.example/oracle:19c",
+		"LEGACY_NOTE=keep-this-value",
 		"ORACLE_PWD=do-not-touch",
 		"CUSTOM=value",
 		"ORACLE_CPUS=4",
@@ -70,6 +70,16 @@ func TestParseByteSize(t *testing.T) {
 		if actual != expected {
 			t.Errorf("parseByteSize(%q) = %d, want %d", input, actual, expected)
 		}
+	}
+}
+
+func TestParseEnvironmentPreservesPasswordQuoteCharacters(t *testing.T) {
+	values, err := parseEnvironment([]byte("ORACLE_PWD='starts-with-a-quote\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values[passwordSettingKey] != "'starts-with-a-quote" {
+		t.Fatalf("password = %q", values[passwordSettingKey])
 	}
 }
 

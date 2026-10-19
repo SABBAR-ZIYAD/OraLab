@@ -9,7 +9,7 @@ OraLab does not replace Oracle's tools. Inside the container, `sqlplus`, `rman`,
 An optional interface at `http://127.0.0.1:8765` shows Docker and Oracle status and lets you adjust the container's CPU and memory limits. The UI is a local resource controller—not a database administration dashboard.
 
 > [!IMPORTANT]
-> OraLab's CLI, direct Docker Engine integration, and browser UI are implemented. The project has not yet selected and validated one exact Oracle 19c image. You must provide `ORACLE_IMAGE` yourself, and verify that the image's license, environment variables, healthcheck, and storage paths match OraLab's current container contract. See [Current project status](#current-project-status).
+> OraLab manages a pinned official Oracle Database 19c Enterprise image internally: `container-registry.oracle.com/database/enterprise:19.3.0.0`. Users do not select or write an image name. Before the first pull, they must accept Oracle Container Registry terms and provide an Oracle Registry auth token when requested.
 
 ## Why OraLab?
 
@@ -28,7 +28,7 @@ To run OraLab, you need:
 - A 64-bit Windows, Linux, or macOS computer.
 - Docker Desktop or Docker Engine running locally.
 - Go 1.24 or newer while tagged release binaries are not yet available.
-- Access to a compatible Oracle Database 19c container image.
+- An Oracle Container Registry account, accepted Oracle terms, and an auth token for the first image pull.
 - Enough memory and disk space for Oracle Database and its persistent data.
 
 The Docker CLI and Docker Compose are **not** runtime requirements.
@@ -78,26 +78,30 @@ oralab doctor
 
 This checks the Docker Engine connection and reports any missing project configuration.
 
-### 2. Create the local configuration
+### 2. Initialize your local lab
 
 ```sh
-oralab setup
+oralab init --cpus 4 --memory 6g --shm 1g
 ```
 
-This copies `.env.example` to `.env`. OraLab refuses to overwrite an existing `.env`.
+OraLab prompts twice for the database password without echoing it to the terminal, then creates the local `.env`. It refuses to overwrite an existing `.env`.
 
-Open `.env` and set at least the image and password expected by your chosen Oracle image:
+The saved configuration contains only your local database and resource settings:
 
 ```dotenv
-ORACLE_IMAGE=your-compatible-oracle-19c-image:tag
 ORACLE_PWD=choose-a-local-lab-password
-
 ORACLE_CPUS=4
 ORACLE_MEMORY=6g
 ORACLE_SHM_SIZE=1g
 ```
 
 Never commit `.env`; it is excluded from Git.
+
+For automated setup, keep the password out of command history and pipe it through standard input:
+
+```sh
+printf '%s' 'choose-a-local-lab-password' | oralab init --cpus 4 --memory 6g --shm 1g --password-stdin
+```
 
 ### 3. Create and start Oracle
 
@@ -108,7 +112,7 @@ oralab up
 OraLab will:
 
 1. Connect to the local Docker Engine API.
-2. Pull `ORACLE_IMAGE` if it is not already available locally.
+2. Pull its pinned Oracle Database 19c Enterprise image if it is not already available locally.
 3. Create the `oralab-oradata` named volume when needed.
 4. Create the managed `oralab-oracle` container when needed.
 5. Publish Oracle port `1521` on `127.0.0.1` only.
@@ -168,7 +172,7 @@ oralab [--project-dir PATH] <command>
 | Command | Description |
 | --- | --- |
 | `oralab doctor` | Check Docker Engine access and project configuration. |
-| `oralab setup` | Safely create `.env` from `.env.example`. |
+| `oralab init --cpus N --memory S --shm S` | Securely collect a password and create `.env` with local resource limits. |
 | `oralab up [--timeout SECONDS]` | Create/start Oracle and wait for readiness. Default: 1,800 seconds. |
 | `oralab status` | Show Docker Engine and Oracle container status. |
 | `oralab logs [OPTIONS]` | Read or follow Oracle container logs. |
@@ -240,17 +244,22 @@ ORACLE_CPUS=4
 ORACLE_MEMORY=6g
 ```
 
-It preserves the image, password, shared-memory setting, and unrelated variables. The UI cannot run SQL, open a terminal, alter Oracle SGA/PGA settings, change global Docker Desktop resources, or delete data.
+It preserves the password, shared-memory setting, and unrelated variables. The UI cannot run SQL, open a terminal, alter Oracle SGA/PGA settings, change global Docker Desktop resources, or delete data.
 
 ## Configuration
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `ORACLE_IMAGE` | Yes | Exact Oracle 19c image reference used to create the container. |
-| `ORACLE_PWD` | Image-dependent | Database password passed to the selected image. Treat it as a secret. |
-| `ORACLE_CPUS` | No | Whole-number CPU limit. Can be managed from `oralab ui`. |
-| `ORACLE_MEMORY` | No | Memory limit in GiB with a `g` suffix, such as `6g`. Can be managed from the UI. |
-| `ORACLE_SHM_SIZE` | No | Container shared-memory size. Defaults to `1g` when empty. |
+| `ORACLE_PWD` | Yes | Database password collected by `oralab init`. Treat it as a secret. |
+| `ORACLE_CPUS` | Yes | Whole-number CPU limit selected during `oralab init` or managed from `oralab ui`. |
+| `ORACLE_MEMORY` | Yes | Memory limit selected during `oralab init`, such as `6g`. |
+| `ORACLE_SHM_SIZE` | Yes | Container shared-memory size selected during `oralab init`, such as `1g`. |
+
+OraLab owns the image reference and does not read it from `.env`:
+
+```text
+container-registry.oracle.com/database/enterprise:19.3.0.0
+```
 
 OraLab currently creates the following Docker resources:
 
@@ -262,18 +271,17 @@ OraLab currently creates the following Docker resources:
 | Container data path | `/opt/oracle/oradata` |
 | Listener binding | `127.0.0.1:1521` → container port `1521` |
 
-These details must be compatible with the Oracle image you select.
+These details match the Oracle Database 19c Enterprise image managed by OraLab.
 
 ### Private registry authentication
 
-When the image registry requires authentication, set temporary credentials in the process environment before `oralab up`.
+Before the first pull, sign in to [Oracle Container Registry](https://container-registry.oracle.com/), accept the applicable terms, and create an auth token. Supply it only in the terminal that runs `oralab up`; OraLab never writes registry credentials to `.env`.
 
 Linux/macOS:
 
 ```sh
 export ORALAB_REGISTRY_USERNAME='your-account'
-export ORALAB_REGISTRY_TOKEN='temporary-token-or-password'
-export ORALAB_REGISTRY_SERVER='container-registry.example.com'
+export ORALAB_REGISTRY_TOKEN='oracle-auth-token'
 oralab up
 ```
 
@@ -281,12 +289,11 @@ Windows PowerShell:
 
 ```powershell
 $env:ORALAB_REGISTRY_USERNAME = 'your-account'
-$env:ORALAB_REGISTRY_TOKEN = 'temporary-token-or-password'
-$env:ORALAB_REGISTRY_SERVER = 'container-registry.example.com'
+$env:ORALAB_REGISTRY_TOKEN = 'oracle-auth-token'
 oralab up
 ```
 
-`ORALAB_REGISTRY_USERNAME` and `ORALAB_REGISTRY_TOKEN` must be supplied together. OraLab encodes the credentials into the Engine API pull request and does not write them to `.env`. Clear the variables when you are finished.
+`ORALAB_REGISTRY_USERNAME` and `ORALAB_REGISTRY_TOKEN` must be supplied together. OraLab automatically targets Oracle Container Registry, encodes the credentials into the Engine API pull request, and does not write them to `.env`. Clear the variables when you are finished.
 
 ## Use OraLab from another directory
 
@@ -355,17 +362,13 @@ oralab doctor
 
 OraLab reads the standard Docker environment configuration, including the local endpoint selected through `DOCKER_HOST`.
 
-### `ORACLE_IMAGE` is empty
-
-Run `oralab setup`, edit `.env`, and provide a compatible image reference. OraLab deliberately has no unvalidated default Oracle image.
-
 ### `.env` already exists
 
-This is intentional: `oralab setup` will not overwrite passwords or local settings. Edit the existing file, or back it up and remove it yourself before running setup again.
+This is intentional: `oralab init` will not overwrite passwords or local settings. Edit the existing file, or back it up and remove it yourself before deliberately initializing again.
 
 ### The image pull is unauthorized
 
-Accept any terms required by the registry, confirm the image reference, and provide the temporary registry variables described under [Private registry authentication](#private-registry-authentication).
+Accept Oracle Container Registry terms, use an Oracle auth token rather than an SSO password, and provide the temporary registry variables described under [Private registry authentication](#private-registry-authentication).
 
 ### The UI refuses a resource update
 
@@ -379,7 +382,7 @@ Inspect the container output:
 oralab logs --no-follow --tail 300 --timestamps
 ```
 
-Confirm that your selected image supports the configured environment variables, exposes port `1521`, stores data at `/opt/oracle/oradata`, and defines a meaningful healthcheck.
+Confirm that Docker has enough CPU, memory, and disk available for Oracle initialization. The managed image exposes port `1521` and stores data at `/opt/oracle/oradata`.
 
 ## Security and scope
 
@@ -422,8 +425,7 @@ Implemented and covered by automated tests:
 
 Still required before OraLab can advertise a complete, ready-to-run Oracle 19c environment:
 
-- Select and document one legally obtainable Oracle 19c image.
-- Validate the container environment, port, data path, and inherited healthcheck against that exact image.
+- Validate initialization, environment behavior, and inherited healthcheck against the built-in Oracle Registry image.
 - Test initialization, persistence, restart, SQL\*Plus, RMAN, listener, Data Pump, and recovery workflows.
 - Complete runtime testing on each supported host platform.
 

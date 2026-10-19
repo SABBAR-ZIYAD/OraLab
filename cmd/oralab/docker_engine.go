@@ -218,6 +218,9 @@ func registryAuthFromEnvironment(getenv func(string) string) (string, error) {
 	if username == "" || token == "" {
 		return "", errors.New("ORALAB_REGISTRY_USERNAME and ORALAB_REGISTRY_TOKEN must be set together")
 	}
+	if server == "" {
+		server = defaultOracleRegistry
+	}
 	payload, err := json.Marshal(registry.AuthConfig{
 		Username:      username,
 		Password:      token,

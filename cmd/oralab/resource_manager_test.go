@@ -83,6 +83,30 @@ func TestParseEnvironmentPreservesPasswordQuoteCharacters(t *testing.T) {
 	}
 }
 
+func TestUnauthorizedOraclePullExplainsOneTimeRegistrySetup(t *testing.T) {
+	err := oracleImagePullError(errors.New("failed to authorize: 401 Unauthorized"))
+	message := err.Error()
+	for _, expected := range []string{
+		oracleRegistryURL,
+		"Database > enterprise",
+		"auth token",
+		"not required for every use",
+		"ORALAB_REGISTRY_USERNAME",
+		"ORALAB_REGISTRY_TOKEN",
+	} {
+		if !strings.Contains(message, expected) {
+			t.Errorf("registry help is missing %q:\n%s", expected, message)
+		}
+	}
+}
+
+func TestNonAuthorizationPullErrorStaysConcise(t *testing.T) {
+	err := oracleImagePullError(errors.New("network timeout"))
+	if strings.Contains(err.Error(), oracleRegistryURL) {
+		t.Fatalf("network error unexpectedly included registry onboarding:\n%s", err)
+	}
+}
+
 func TestManagerReadsTypedEngineResponses(t *testing.T) {
 	root := projectFixture(t)
 	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte("ORACLE_CPUS=4\nORACLE_MEMORY=6g\n"), 0o600); err != nil {

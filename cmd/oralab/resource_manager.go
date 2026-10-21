@@ -29,6 +29,9 @@ const (
 	oracleVolumeName      = "oralab-oradata"
 	oracleDataPath        = "/opt/oracle/oradata"
 	oracleListenerPort    = "1521"
+	oracleSID             = "ORCLCDB"
+	oraclePDB             = "ORCLPDB1"
+	oracleRegistryURL     = "https://container-registry.oracle.com/"
 	operationTimeout      = 31 * time.Minute
 	stateTimeout          = 12 * time.Second
 )
@@ -337,12 +340,17 @@ func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string
 		return engineContainer{}, errors.New("ORACLE_CPUS and ORACLE_MEMORY must be configured before creating Oracle")
 	}
 	if err := engine.EnsureImage(ctx, defaultOracleImage); err != nil {
-		return engineContainer{}, fmt.Errorf("make Oracle image available: %w", err)
+		return engineContainer{}, oracleImagePullError(err)
 	}
 	_, err = engine.CreateContainer(ctx, engineContainerSpec{
 		Name: oracleContainerName, Image: defaultOracleImage,
-		Environment: []string{passwordSettingKey + "=" + config.Password, "ORACLE_EDITION=enterprise"},
-		CPUs:        config.CPUs, MemoryBytes: config.MemoryBytes, ShmBytes: config.ShmBytes,
+		Environment: []string{
+			passwordSettingKey + "=" + config.Password,
+			"ORACLE_EDITION=enterprise",
+			"ORACLE_SID=" + oracleSID,
+			"ORACLE_PDB=" + oraclePDB,
+		},
+		CPUs: config.CPUs, MemoryBytes: config.MemoryBytes, ShmBytes: config.ShmBytes,
 		StopTimeout: defaultStop, VolumeName: oracleVolumeName, VolumePath: oracleDataPath,
 		HostIP: "127.0.0.1", HostPort: oracleListenerPort, TargetPort: oracleListenerPort + "/tcp",
 		Labels: map[string]string{managedLabel: "true"},
@@ -351,6 +359,24 @@ func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string
 		return engineContainer{}, err
 	}
 	return engine.InspectContainer(ctx, oracleContainerName)
+}
+
+func oracleImagePullError(err error) error {
+	detail := strings.ToLower(err.Error())
+	if !strings.Contains(detail, "401") && !strings.Contains(detail, "unauthorized") &&
+		!strings.Contains(detail, "authentication required") && !strings.Contains(detail, "failed to authorize") {
+		return fmt.Errorf("pull OraLab's Oracle 19c image %s: %w", defaultOracleImage, err)
+	}
+	return fmt.Errorf(`pull OraLab's Oracle 19c image %s: %w
+
+Oracle requires one-time access setup before the first download:
+  1. Open %s
+  2. Sign in, open Database > enterprise, and accept the repository terms.
+  3. Create an Oracle Container Registry auth token (SSO passwords are not accepted).
+  4. Set ORALAB_REGISTRY_USERNAME and ORALAB_REGISTRY_TOKEN, then retry oralab up.
+
+This is not required for every use. Once the image is downloaded, OraLab reuses it locally.
+Authentication is needed again only if the image is removed, Docker data is reset, or a new image must be downloaded.`, defaultOracleImage, err, oracleRegistryURL)
 }
 
 func waitForReadiness(ctx context.Context, engine dockerEngine, name string) error {

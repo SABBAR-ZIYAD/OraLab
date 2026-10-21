@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v0.1.0 or v0.1.0-rc.1" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Build release archives
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          ldflags="-s -w -X main.version=${version}"
+          mkdir -p dist build/windows-amd64 build/linux-amd64 build/darwin-amd64
+
+          GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "${ldflags}" -o build/windows-amd64/oralab.exe ./cmd/oralab
+          GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "${ldflags}" -o build/linux-amd64/oralab ./cmd/oralab
+          GOOS=darwin GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "${ldflags}" -o build/darwin-amd64/oralab ./cmd/oralab
+
+          zip -j "dist/oralab_${version}_windows_amd64.zip" build/windows-amd64/oralab.exe
+          tar -C build/linux-amd64 -czf "dist/oralab_${version}_linux_amd64.tar.gz" oralab
+          tar -C build/darwin-amd64 -czf "dist/oralab_${version}_darwin_amd64.tar.gz" oralab
+
+          cd dist
+          sha256sum oralab_* > checksums.txt
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          prerelease=()
+          if [[ "${version}" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "OraLab ${version}" \
+            "${prerelease[@]}"

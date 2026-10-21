@@ -9,7 +9,7 @@ OraLab does not replace Oracle's tools. Inside the container, `sqlplus`, `rman`,
 An optional interface at `http://127.0.0.1:8765` shows Docker and Oracle status and lets you adjust the container's CPU and memory limits. The UI is a local resource controller—not a database administration dashboard.
 
 > [!IMPORTANT]
-> OraLab manages a pinned official Oracle Database 19c Enterprise image internally: `container-registry.oracle.com/database/enterprise:19.3.0.0`. Users do not select or write an image name. Before the first pull, they must accept Oracle Container Registry terms and provide an Oracle Registry auth token when requested.
+> OraLab manages a pinned official Oracle Database 19c Enterprise image internally: `container-registry.oracle.com/database/enterprise:19.3.0.0`. Users do not select or write an image name. Before the first pull, they must accept Oracle Container Registry terms and provide an Oracle Registry auth token when requested. See [Oracle registry access](#oracle-registry-access).
 
 ## Why OraLab?
 
@@ -27,15 +27,24 @@ To run OraLab, you need:
 
 - A 64-bit Windows, Linux, or macOS computer.
 - Docker Desktop or Docker Engine running locally.
-- Go 1.24 or newer while tagged release binaries are not yet available.
 - An Oracle Container Registry account, accepted Oracle terms, and an auth token for the first image pull.
 - Enough memory and disk space for Oracle Database and its persistent data.
 
-The Docker CLI and Docker Compose are **not** runtime requirements.
+The Docker CLI, Docker Compose, and Go are **not** runtime requirements. Go 1.24 or newer is needed only when building OraLab from source.
 
 ## Installation
 
-There is no tagged release yet, so build the current version from source.
+Download the archive for your operating system from the [latest OraLab release](https://github.com/SABBAR-ZIYAD/OraLab/releases/latest):
+
+- `oralab_VERSION_windows_amd64.zip`
+- `oralab_VERSION_linux_amd64.tar.gz`
+- `oralab_VERSION_darwin_amd64.tar.gz`
+
+Extract the archive and optionally move the executable into a directory on your `PATH`. The executable contains the configuration template it needs, so users do not need to clone this repository. These builds currently target x86-64/AMD64 because OraLab's supported Oracle 19c image is published for `linux/amd64`.
+
+### Build from source
+
+Contributors and users who prefer source builds need Go 1.24 or newer.
 
 ### Windows PowerShell
 
@@ -66,25 +75,19 @@ oralab version
 
 ## Quick start
 
-All examples below use `oralab`. If you kept the newly built binary in the repository, use `./oralab` on Linux/macOS or `./oralab.exe` in PowerShell instead.
+All examples below use `oralab`. If it is not on your `PATH`, use the executable's full path instead.
 
-### 1. Check the environment
+### 1. Initialize your local lab
 
-From the cloned OraLab repository, run:
-
-```sh
-oralab doctor
-```
-
-This checks the Docker Engine connection and reports any missing project configuration.
-
-### 2. Initialize your local lab
+Create a dedicated directory for the lab, change into it, and initialize it:
 
 ```sh
+mkdir my-oracle-lab
+cd my-oracle-lab
 oralab init --cpus 4 --memory 6g --shm 1g
 ```
 
-OraLab prompts twice for the database password without echoing it to the terminal, then creates the local `.env`. It refuses to overwrite an existing `.env`.
+OraLab prompts twice for the database password without echoing it, then creates `.env` and an embedded `.env.example` project marker. It refuses to overwrite an existing `.env`.
 
 The saved configuration contains only your local database and resource settings:
 
@@ -102,6 +105,16 @@ For automated setup, keep the password out of command history and pipe it throug
 ```sh
 printf '%s' 'choose-a-local-lab-password' | oralab init --cpus 4 --memory 6g --shm 1g --password-stdin
 ```
+
+### 2. Check the environment
+
+Then verify Docker and the configuration:
+
+```sh
+oralab doctor
+```
+
+Before the first pull, sign in at the [Oracle Container Registry](https://container-registry.oracle.com/), open the **database/enterprise** repository, and accept Oracle's terms. Then provide your registry credentials as described under [Oracle registry access](#oracle-registry-access).
 
 ### 3. Create and start Oracle
 
@@ -273,9 +286,9 @@ OraLab currently creates the following Docker resources:
 
 These details match the Oracle Database 19c Enterprise image managed by OraLab.
 
-### Private registry authentication
+### Oracle registry access
 
-Before the first pull, sign in to [Oracle Container Registry](https://container-registry.oracle.com/), accept the applicable terms, and create an auth token. Supply it only in the terminal that runs `oralab up`; OraLab never writes registry credentials to `.env`.
+Oracle distributes the default 19c image through the Oracle Container Registry. Sign in at [container-registry.oracle.com](https://container-registry.oracle.com/), open the **database/enterprise** repository, and accept the terms once for your Oracle account. Then set temporary credentials in the process environment before `oralab up`.
 
 Linux/macOS:
 
@@ -293,7 +306,9 @@ $env:ORALAB_REGISTRY_TOKEN = 'oracle-auth-token'
 oralab up
 ```
 
-`ORALAB_REGISTRY_USERNAME` and `ORALAB_REGISTRY_TOKEN` must be supplied together. OraLab automatically targets Oracle Container Registry, encodes the credentials into the Engine API pull request, and does not write them to `.env`. Clear the variables when you are finished.
+`ORALAB_REGISTRY_USERNAME` and `ORALAB_REGISTRY_TOKEN` must be supplied together. Use your Oracle account name and an Oracle Container Registry auth token; Oracle no longer accepts SSO passwords for registry CLI authentication. OraLab encodes the credentials into the Engine API pull request and does not write them to `.env`. Clear the variables when you are finished.
+
+License acceptance is normally a one-time action for the Oracle account. Registry authentication is needed when downloading the image, not whenever the container starts. After the image is local, OraLab can start and stop the lab without contacting the registry. You must authenticate again on a new machine, after removing/resetting Docker's local images, or when OraLab needs to download another image version.
 
 ## Use OraLab from another directory
 
@@ -368,7 +383,7 @@ This is intentional: `oralab init` will not overwrite passwords or local setting
 
 ### The image pull is unauthorized
 
-Accept Oracle Container Registry terms, use an Oracle auth token rather than an SSO password, and provide the temporary registry variables described under [Private registry authentication](#private-registry-authentication).
+Accept the database/enterprise terms in Oracle Container Registry and provide the temporary registry variables described under [Oracle registry access](#oracle-registry-access).
 
 ### The UI refuses a resource update
 
@@ -382,7 +397,7 @@ Inspect the container output:
 oralab logs --no-follow --tail 300 --timestamps
 ```
 
-Confirm that Docker has enough CPU, memory, and disk available for Oracle initialization. The managed image exposes port `1521` and stores data at `/opt/oracle/oradata`.
+Review the logs for Oracle initialization or resource errors. OraLab's default image contract uses `ORACLE_PWD`, port `1521`, `/opt/oracle/oradata`, and the image's healthcheck.
 
 ## Security and scope
 
@@ -411,6 +426,17 @@ When Node.js is installed, validate the embedded browser JavaScript with:
 node --check cmd/oralab/web/app.js
 ```
 
+## Publishing a release
+
+Maintainers publish ready-to-run binaries by creating and pushing a semantic version tag from a tested commit:
+
+```sh
+git tag -a v0.1.0 -m "OraLab v0.1.0"
+git push origin v0.1.0
+```
+
+The release workflow tests the source, builds Windows, Linux, and Intel macOS binaries, embeds `0.1.0` as the application version, creates compressed archives and SHA-256 checksums, and publishes a GitHub Release with generated notes. Pre-release tags such as `v0.2.0-rc.1` are published as GitHub pre-releases.
+
 ## Current project status
 
 Implemented and covered by automated tests:
@@ -421,13 +447,14 @@ Implemented and covered by automated tests:
 - Image pull authentication, container logs, exec, and native exit statuses.
 - Embedded localhost Resource Manager and live CPU/RAM updates.
 - Persistent volume handling and non-destructive lifecycle commands.
-- Source builds for Windows, Linux, and macOS.
+- Automated release binaries for Windows, Linux, and Intel macOS.
+- End-to-end Oracle 19c validation on Windows, including initialization, persistence, restart, SQL\*Plus, RMAN, listener status, and Data Pump availability.
 
 Still required before OraLab can advertise a complete, ready-to-run Oracle 19c environment:
 
-- Validate initialization, environment behavior, and inherited healthcheck against the built-in Oracle Registry image.
-- Test initialization, persistence, restart, SQL\*Plus, RMAN, listener, Data Pump, and recovery workflows.
-- Complete runtime testing on each supported host platform.
+- Complete runtime testing on Linux and macOS hosts.
+- Validate a full backup-and-recovery exercise beyond the current RMAN command check.
+- Add platform code signing/notarization if OraLab is distributed beyond unsigned preview releases.
 
 ## Contributing
 

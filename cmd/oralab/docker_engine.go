@@ -357,6 +357,7 @@ func (e *mobyEngine) Exec(ctx context.Context, name string, command []string, tt
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
+		Env:          []string{"ORACLE_SID=" + oracleSID, "ORACLE_PDB=" + oraclePDB},
 		Cmd:          append([]string(nil), command...),
 	})
 	if err != nil {

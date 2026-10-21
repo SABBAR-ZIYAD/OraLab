@@ -29,6 +29,7 @@ type fakeEngine struct {
 	updateCPUs     int
 	updateMemory   int64
 	execCommand    []string
+	execTTY        bool
 	execExit       int
 	execErr        error
 	logsOptions    logOptions
@@ -100,8 +101,9 @@ func (f *fakeEngine) Logs(_ context.Context, _ string, options logOptions, _, _ 
 	f.logsOptions = options
 	return nil
 }
-func (f *fakeEngine) Exec(_ context.Context, _ string, command []string, _ bool, _ io.Reader, _, _ io.Writer) (int, error) {
+func (f *fakeEngine) Exec(_ context.Context, _ string, command []string, tty bool, _ io.Reader, _, _ io.Writer) (int, error) {
 	f.execCommand = append([]string(nil), command...)
+	f.execTTY = tty
 	return f.execExit, f.execErr
 }
 

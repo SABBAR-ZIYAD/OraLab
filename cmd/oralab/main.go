@@ -68,6 +68,14 @@ func (a app) run(args []string) int {
 		fmt.Fprintf(a.stdout, "oralab %s\n", version)
 		return 0
 	}
+	if command == "init" || command == "setup" {
+		root, err := a.resolveInitDir(projectDir)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "oralab: %v\n", err)
+			return 1
+		}
+		return a.init(root, commandArgs)
+	}
 	root, err := a.resolveProjectDir(projectDir)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "oralab: %v\n", err)
@@ -77,8 +85,6 @@ func (a app) run(args []string) int {
 	switch command {
 	case "doctor":
 		return a.doctor(root, commandArgs)
-	case "init", "setup":
-		return a.init(root, commandArgs)
 	case "ui":
 		return a.ui(root, commandArgs)
 	case "up":
@@ -106,7 +112,7 @@ func (a app) run(args []string) int {
 			fmt.Fprintln(a.stderr, "usage: oralab shell")
 			return 2
 		}
-		return a.exec([]string{"bash"})
+		return a.exec([]string{"bash"}, true)
 	case "exec":
 		if len(commandArgs) > 0 && commandArgs[0] == "--" {
 			commandArgs = commandArgs[1:]
@@ -115,7 +121,7 @@ func (a app) run(args []string) int {
 			fmt.Fprintln(a.stderr, "usage: oralab exec -- <native-command> [arguments...]")
 			return 2
 		}
-		return a.exec(commandArgs)
+		return a.exec(commandArgs, false)
 	case "start":
 		if len(commandArgs) != 0 {
 			fmt.Fprintln(a.stderr, "usage: oralab start")
@@ -141,6 +147,31 @@ func (a app) run(args []string) int {
 		a.printHelp(a.stderr)
 		return 2
 	}
+}
+
+func (a app) resolveInitDir(explicit string) (string, error) {
+	if explicit == "" {
+		explicit = a.getenv("ORALAB_PROJECT_DIR")
+	}
+	if explicit == "" {
+		workingDirectory, err := a.getwd()
+		if err != nil {
+			return "", fmt.Errorf("determine current directory: %w", err)
+		}
+		explicit = workingDirectory
+	}
+	absolute, err := filepath.Abs(explicit)
+	if err != nil {
+		return "", fmt.Errorf("resolve project directory: %w", err)
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return "", fmt.Errorf("open project directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("project path is not a directory: %s", absolute)
+	}
+	return absolute, nil
 }
 
 func (a app) parseGlobalOptions(args []string) (string, []string, error) {
@@ -290,7 +321,7 @@ func (a app) logs(options logOptions) int {
 	return 0
 }
 
-func (a app) exec(command []string) int {
+func (a app) exec(command []string, tty bool) int {
 	engine, ok := a.openEngine()
 	if !ok {
 		return 1
@@ -302,7 +333,7 @@ func (a app) exec(command []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	exitCode, err := engine.Exec(ctx, oracleContainerName, command, true, a.stdin, a.stdout, a.stderr)
+	exitCode, err := engine.Exec(ctx, oracleContainerName, command, tty, a.stdin, a.stdout, a.stderr)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "oralab: execute in Oracle container: %v\n", err)
 		return 1
@@ -463,14 +494,51 @@ func (a app) init(root string, args []string) int {
 		fmt.Fprintf(a.stderr, "oralab: read database password: %v\n", err)
 		return 1
 	}
-	if err := createLabConfig(filepath.Join(root, environmentFile), password, options); err != nil {
+	configPath := filepath.Join(root, environmentFile)
+	if err := createLabConfig(configPath, password, options); err != nil {
 		fmt.Fprintf(a.stderr, "oralab: create local configuration: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(a.stdout, "Created %s for Oracle Database 19c Enterprise.\n", filepath.Join(root, environmentFile))
-	fmt.Fprintln(a.stdout, "Before the first pull, accept Oracle Container Registry terms and provide your registry auth token if requested.")
+	if err := ensureEnvironmentSample(root); err != nil {
+		_ = os.Remove(configPath)
+		fmt.Fprintf(a.stderr, "oralab: create project marker: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.stdout, "Created %s for Oracle Database 19c Enterprise.\n", configPath)
+	fmt.Fprintf(a.stdout, `Before the first pull, complete Oracle's one-time registry setup:
+  %s
+Sign in, open Database > enterprise, accept the terms, and create an auth token.
+Once downloaded, OraLab reuses the local image without signing in on every use.
+`, oracleRegistryURL)
 	fmt.Fprintln(a.stdout, "Next: oralab up")
 	return 0
+}
+
+func ensureEnvironmentSample(root string) error {
+	path := filepath.Join(root, environmentSample)
+	if regularFile(path) {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) && regularFile(path) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(embeddedEnvironmentSample); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func (a app) readInitialPassword(fromStdin bool) (string, error) {
@@ -617,8 +685,8 @@ Usage:
 
 Commands:
   doctor                     Check Docker Engine and project configuration
-	init --cpus N --memory S --shm S [--password-stdin]
-	                           Configure this lab and securely collect its database password
+  init --cpus N --memory S --shm S [--password-stdin]
+                              Configure this lab and securely collect its database password
   ui [--port PORT] [--no-open]
                               Open the local CPU/RAM resource manager
   up [--timeout SECONDS]     Create/start Oracle and wait for readiness

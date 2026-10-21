@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,22 @@ func TestExecPreservesNativeOracleArguments(t *testing.T) {
 	if !reflect.DeepEqual(engine.execCommand, want) {
 		t.Fatalf("command = %#v, want %#v", engine.execCommand, want)
 	}
+	if engine.execTTY {
+		t.Fatal("non-interactive exec unexpectedly allocated a TTY")
+	}
+}
+
+func TestShellAllocatesTTY(t *testing.T) {
+	root := projectFixture(t)
+	engine := &fakeEngine{}
+	a, _, stderr := testApp(root, engine)
+
+	if code := a.run([]string{"shell"}); code != 0 {
+		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !engine.execTTY {
+		t.Fatal("shell did not allocate a TTY")
+	}
 }
 
 func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
@@ -71,6 +88,11 @@ func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 	}
 	if engine.createSpec.VolumeName != oracleVolumeName || engine.createSpec.VolumePath != oracleDataPath {
 		t.Fatalf("volume spec = %#v", engine.createSpec)
+	}
+	for _, expected := range []string{"ORACLE_SID=" + oracleSID, "ORACLE_PDB=" + oraclePDB} {
+		if !slices.Contains(engine.createSpec.Environment, expected) {
+			t.Errorf("container environment is missing %q: %#v", expected, engine.createSpec.Environment)
+		}
 	}
 	if engine.startCalls != 1 {
 		t.Fatalf("start calls = %d", engine.startCalls)
@@ -144,6 +166,41 @@ func TestInitNeverOverwritesExistingEnvironment(t *testing.T) {
 	}
 	if string(contents) != "KEEP=yes\n" {
 		t.Fatalf(".env changed to %q", contents)
+	}
+}
+
+func TestInitInitializesEmptyDirectoryFromEmbeddedSample(t *testing.T) {
+	root := t.TempDir()
+	a, _, stderr := testApp(root, &fakeEngine{})
+
+	if code := a.run([]string{"init", "--cpus", "4", "--memory", "6g", "--shm", "1g"}); code != 0 {
+		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(root, environmentSample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, embeddedEnvironmentSample) {
+		t.Fatal(".env.example does not contain the embedded environment sample")
+	}
+	if _, err := os.Stat(filepath.Join(root, environmentFile)); err != nil {
+		t.Fatalf("standalone init did not create .env: %v", err)
+	}
+	if !isProjectDirectory(root) {
+		t.Fatal("standalone setup did not create an OraLab project directory")
+	}
+}
+
+func TestEmbeddedEnvironmentSampleMatchesRepository(t *testing.T) {
+	repositorySample, err := os.ReadFile(filepath.Join("..", "..", environmentSample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizeLines := func(contents []byte) []byte {
+		return bytes.ReplaceAll(contents, []byte("\r\n"), []byte("\n"))
+	}
+	if !bytes.Equal(normalizeLines(repositorySample), normalizeLines(embeddedEnvironmentSample)) {
+		t.Fatal("cmd/oralab/env.example must match the repository .env.example")
 	}
 }
 

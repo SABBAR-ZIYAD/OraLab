@@ -40,34 +40,40 @@ These builds currently target x86-64/AMD64 because OraLab's supported Oracle 19c
 
 ### Installation wizard (recommended)
 
-Clone the repository once, or pull the latest installer changes in an existing clone:
+#### Step 1: Download the installer
+
+Clone this repository:
 
 ```sh
 git clone https://github.com/SABBAR-ZIYAD/OraLab.git
 cd OraLab
 ```
 
-If the repository is already present, update it instead:
+If you already cloned it, open a terminal in the repository and update it instead:
 
 ```sh
 git pull
 ```
 
-Windows Command Prompt or PowerShell:
+#### Step 2: Run the installer
+
+On Windows, use Command Prompt or PowerShell:
 
 ```bat
 .\install.cmd
 ```
 
-Linux or macOS:
+On Linux or macOS:
 
 ```sh
 bash ./install.sh
 ```
 
-Use <kbd>↑</kbd>/<kbd>↓</kbd> to select your operating system and press <kbd>Enter</kbd>. The detected operating system is selected by default. The wizard refuses to install a binary for a different operating system or an unsupported CPU architecture.
+#### Step 3: Select the operating system
 
-The wizard installs OraLab without administrator access:
+Use <kbd>↑</kbd>/<kbd>↓</kbd> to select your operating system, then press <kbd>Enter</kbd>. The detected operating system is selected by default. The wizard will not install a binary for a different operating system or an unsupported CPU architecture.
+
+The installer downloads the latest published OraLab release, verifies its SHA-256 checksum, installs it without administrator access, and adds its directory to your user `PATH` when necessary:
 
 | Platform | Installation location |
 | --- | --- |
@@ -75,13 +81,17 @@ The wizard installs OraLab without administrator access:
 | Linux | `~/.local/bin/oralab` |
 | macOS | `~/.local/bin/oralab` |
 
-Open a new terminal if the wizard updated `PATH`, then verify the installation:
+#### Step 4: Open a new terminal
+
+Close the current terminal and open a new one if the installer says it updated `PATH`. This makes the `oralab` command available everywhere.
+
+#### Step 5: Verify the installation
 
 ```sh
 oralab version
 ```
 
-Continue with [Quick start](#quick-start) to create the lab configuration before running `oralab doctor`.
+The command should print the installed version, for example `oralab 0.1.0`. Continue with [First-time setup](#first-time-setup) to configure and start Oracle.
 
 For automated installation, skip the menu by passing the native operating system explicitly:
 
@@ -137,23 +147,55 @@ sudo install -m 0755 oralab /usr/local/bin/oralab
 oralab version
 ```
 
-## Quick start
+## First-time setup
 
 All examples below use `oralab`. If it is not on your `PATH`, use the executable's full path instead.
 
-### 1. Initialize your local lab
+### Step 1: Start Docker
 
-Create a dedicated directory for the lab, change into it, and initialize it:
+Start Docker Desktop on Windows or macOS, or Docker Engine on Linux. Wait until Docker reports that the engine is running.
+
+### Step 2: Create a lab directory
+
+The lab directory stores the local configuration. It can be anywhere and does not need to be inside the cloned OraLab repository.
+
+Windows Command Prompt:
+
+```bat
+mkdir "%USERPROFILE%\my-oracle-lab"
+cd /d "%USERPROFILE%\my-oracle-lab"
+```
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\my-oracle-lab"
+Set-Location "$HOME\my-oracle-lab"
+```
+
+Linux or macOS:
 
 ```sh
-mkdir my-oracle-lab
-cd my-oracle-lab
+mkdir -p ~/my-oracle-lab
+cd ~/my-oracle-lab
+```
+
+### Step 3: Initialize the configuration
+
+```sh
 oralab init --cpus 4 --memory 6g --shm 1g
 ```
 
-OraLab prompts twice for the database password without echoing it, then creates `.env` and an embedded `.env.example` project marker. It refuses to overwrite an existing `.env`.
+| Option | Explanation |
+| --- | --- |
+| `--cpus 4` | Limit the Oracle container to four CPU cores. The value must be a whole number. |
+| `--memory 6g` | Limit the Oracle container to 6 GiB of memory. |
+| `--shm 1g` | Give Oracle a 1 GiB shared-memory area. |
+| `--password-stdin` | Optional. Read one password from standard input instead of prompting twice. Intended for automation. |
 
-The saved configuration contains only your local database and resource settings:
+OraLab prompts twice for the database password without displaying it. It then creates `.env` and an embedded `.env.example` project marker. It refuses to overwrite an existing `.env`.
+
+The saved `.env` contains the local database password and resource settings:
 
 ```dotenv
 ORACLE_PWD=choose-a-local-lab-password
@@ -162,25 +204,51 @@ ORACLE_MEMORY=6g
 ORACLE_SHM_SIZE=1g
 ```
 
-Never commit `.env`; it is excluded from Git.
+Do not commit or share `.env`. If you automate initialization, pass the password to `--password-stdin` without putting it directly in shell history.
 
-For automated setup, keep the password out of command history and pipe it through standard input:
-
-```sh
-printf '%s' 'choose-a-local-lab-password' | oralab init --cpus 4 --memory 6g --shm 1g --password-stdin
-```
-
-### 2. Check the environment
-
-Then verify Docker and the configuration:
+### Step 4: Check the environment
 
 ```sh
 oralab doctor
 ```
 
-Before the first pull, sign in at the [Oracle Container Registry](https://container-registry.oracle.com/), open the **database/enterprise** repository, and accept Oracle's terms. Then provide your registry credentials as described under [Oracle registry access](#oracle-registry-access).
+This checks the project configuration and confirms that OraLab can communicate with the local Docker Engine. Fix any reported problem before continuing.
 
-### 3. Create and start Oracle
+### Step 5: Prepare Oracle Registry access
+
+This step is required only when Docker needs to download the Oracle image.
+
+1. Sign in at the [Oracle Container Registry](https://container-registry.oracle.com/).
+2. Open the **database/enterprise** repository and accept its terms.
+3. Create or obtain an Oracle Container Registry authentication token.
+4. Set the username and token temporarily in the terminal that will run `oralab up`.
+
+Windows Command Prompt:
+
+```bat
+set ORALAB_REGISTRY_USERNAME=your-oracle-account
+set ORALAB_REGISTRY_TOKEN=your-auth-token
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ORALAB_REGISTRY_USERNAME = 'your-oracle-account'
+$env:ORALAB_REGISTRY_TOKEN = 'your-auth-token'
+```
+
+Linux or macOS:
+
+```sh
+export ORALAB_REGISTRY_USERNAME='your-oracle-account'
+export ORALAB_REGISTRY_TOKEN='your-auth-token'
+```
+
+The variables must be supplied together. OraLab uses them for the image pull and does not save them in `.env`.
+
+### Step 6: Download, create, and start Oracle
+
+From the lab directory, run:
 
 ```sh
 oralab up
@@ -189,48 +257,142 @@ oralab up
 OraLab will:
 
 1. Connect to the local Docker Engine API.
-2. Pull its pinned Oracle Database 19c Enterprise image if it is not already available locally.
-3. Create the `oralab-oradata` named volume when needed.
-4. Create the managed `oralab-oracle` container when needed.
+2. Download its pinned Oracle Database 19c Enterprise image if it is not already available.
+3. Create the persistent `oralab-oradata` volume when needed.
+4. Create and start the managed `oralab-oracle` container.
 5. Publish Oracle port `1521` on `127.0.0.1` only.
-6. Start the container and wait for its image healthcheck. If the image has no healthcheck, OraLab treats a running container as ready.
+6. Wait until Oracle is ready.
 
-Long-running commands report each real stage in the terminal. Image download events are throttled to remain readable, and readiness messages include elapsed time instead of displaying fake percentages. A first startup looks like:
-
-```text
-OraLab - Oracle Database 19c
-
-[OK] Docker Engine is available
-[..] Checking the Oracle Database 19c image
-[..] Pulling Oracle image: Downloading [layer-id] (42%)
-[OK] Oracle Database 19c image downloaded
-[..] Creating the Oracle container and persistent storage
-[OK] Oracle container and persistent storage are ready
-[..] Starting the Oracle container
-[OK] Oracle container started
-[..] Waiting for Oracle readiness
-[..] Oracle is starting (elapsed 30s)
-[OK] Oracle Database 19c is running and ready
-```
-
-OraLab reports cached images, existing containers, already-running or already-stopped states, failures, and successful completion accurately. `stop` also confirms that the persistent database files were preserved.
-
-The first Oracle initialization can take several minutes. The default startup timeout is 1,800 seconds:
+The first image download and database initialization can take several minutes. The default startup timeout is 1,800 seconds (30 minutes). To allow 40 minutes instead:
 
 ```sh
 oralab up --timeout 2400
 ```
 
-### 4. Check status and logs
+After the image has been downloaded, normal `start` and `stop` operations do not need registry credentials. Clear the temporary values when the first startup finishes.
+
+Windows Command Prompt:
+
+```bat
+set ORALAB_REGISTRY_USERNAME=
+set ORALAB_REGISTRY_TOKEN=
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item Env:ORALAB_REGISTRY_USERNAME
+Remove-Item Env:ORALAB_REGISTRY_TOKEN
+```
+
+Linux or macOS:
+
+```sh
+unset ORALAB_REGISTRY_USERNAME ORALAB_REGISTRY_TOKEN
+```
+
+### Step 7: Verify the database
 
 ```sh
 oralab status
-oralab logs --tail 200
+oralab exec -- sqlplus / as sysdba
 ```
 
-Run `oralab logs` without `--no-follow` to stream logs until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>.
+At the SQL prompt, run:
 
-### 5. Use Oracle's native tools
+```sql
+SELECT banner FROM v$version;
+EXIT;
+```
+
+### Step 8: Create a regular database user (recommended)
+
+`SYSDBA` has unrestricted administrative access. Create a separate user in the default pluggable database for exercises and application work:
+
+```sh
+oralab exec -- sqlplus / as sysdba
+```
+
+Then run the following SQL, replacing the example password:
+
+```sql
+ALTER SESSION SET CONTAINER = ORCLPDB1;
+
+CREATE USER labuser IDENTIFIED BY "choose-a-different-password";
+GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW,
+      CREATE SEQUENCE, CREATE PROCEDURE, CREATE TRIGGER
+TO labuser;
+ALTER USER labuser QUOTA UNLIMITED ON USERS;
+EXIT;
+```
+
+Open a container shell and connect as the regular user. Omitting the password from the command makes SQL*Plus prompt for it:
+
+```sh
+oralab shell
+sqlplus labuser@ORCLPDB1
+```
+
+Use `labuser` for everyday work, `SYSTEM` for ordinary administration, and `SYSDBA` only for database-level administration.
+
+To connect as the built-in `SYSTEM` administrator instead, run `sqlplus system@ORCLPDB1` from `oralab shell` and enter the database password chosen during `oralab init`.
+
+You can also connect from SQL Developer, DBeaver, or another client installed on the host:
+
+| Setting | Value |
+| --- | --- |
+| Host | `127.0.0.1` |
+| Port | `1521` |
+| Connection type | Service name |
+| Service name | `ORCLPDB1` |
+| Username | `labuser` or `system` |
+| Password | The password for the selected user |
+
+## Everyday use
+
+Run OraLab commands from the lab directory containing `.env`, or use `--project-dir` as described below.
+
+### Start a work session
+
+```sh
+oralab status
+oralab start
+oralab shell
+```
+
+Inside the container, connect to the default pluggable database:
+
+```sh
+sqlplus labuser@ORCLPDB1
+```
+
+If `status` already reports that Oracle is running and ready, you do not need to run `start` again.
+
+### Stop a work session
+
+Exit SQL*Plus and the container shell, then stop Oracle gracefully:
+
+```text
+SQL> EXIT
+$ exit
+```
+
+```sh
+oralab stop
+```
+
+Stopping the container preserves the database in the `oralab-oradata` volume.
+
+### Inspect status and logs
+
+```sh
+oralab status
+oralab logs --no-follow --tail 200
+```
+
+To follow new log messages continuously, omit `--no-follow`. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to stop following the logs; this does not stop Oracle.
+
+### Run Oracle tools
 
 Open a Bash shell in the container:
 
@@ -238,9 +400,10 @@ Open a Bash shell in the container:
 oralab shell
 ```
 
-Then use Oracle normally:
+Then use Oracle's tools normally:
 
 ```sh
+sqlplus labuser@ORCLPDB1
 sqlplus / as sysdba
 rman target /
 lsnrctl status
@@ -248,7 +411,7 @@ expdp help=y
 impdp help=y
 ```
 
-Or execute a native tool directly from the host:
+Or execute a tool directly from the host:
 
 ```sh
 oralab exec -- sqlplus / as sysdba
@@ -259,6 +422,14 @@ oralab exec -- impdp help=y
 ```
 
 The `--` ends OraLab option processing. Everything after it is passed to the container as separate, unchanged arguments. OraLab returns the command's container exit status.
+
+### Open the Resource Manager
+
+```sh
+oralab ui
+```
+
+This opens `http://127.0.0.1:8765`, where you can inspect status, monitor resource use, start or stop the container, and change its CPU and memory limits.
 
 ## Command reference
 
@@ -282,7 +453,44 @@ oralab [--project-dir PATH] <command>
 | `oralab version` | Print the OraLab version. |
 | `oralab help` | Print command-line help. |
 
+### Global option
+
+| Option | Explanation |
+| --- | --- |
+| `--project-dir PATH` | Use the lab configuration at `PATH` instead of searching the current directory and its parents. Place this option before the command, for example `oralab --project-dir C:\labs\demo status`. |
+
+### Initialization options
+
+These options belong to `oralab init`:
+
+| Option | Required | Explanation |
+| --- | --- | --- |
+| `--cpus COUNT` | Yes | Whole-number CPU limit for the Oracle container. |
+| `--memory SIZE` | Yes | Container memory limit, such as `6g`. |
+| `--shm SIZE` | Yes | Shared-memory size, such as `1g`. |
+| `--password-stdin` | No | Read one password from standard input. Without it, OraLab securely prompts for the password twice. |
+
+### Lifecycle options
+
+| Command and option | Explanation |
+| --- | --- |
+| `oralab up --timeout SECONDS` | Create or start the container and wait up to this many seconds for Oracle readiness. The default is 1,800 seconds. |
+| `oralab stop --timeout SECONDS` | Give Oracle up to this many seconds to stop gracefully. The default is 600 seconds. |
+| `oralab restart --timeout SECONDS` | Use this shutdown timeout while gracefully restarting Oracle. The default is 600 seconds. |
+
+Examples:
+
+```sh
+oralab up --timeout 2400
+oralab stop --timeout 900
+oralab restart --timeout 900
+```
+
+`oralab start` has no options. It starts an existing container and waits for Oracle readiness. Use `oralab up` for the first run because `up` can also download the image and create the container and volume.
+
 ### Log options
+
+These options belong to `oralab logs` and can be combined:
 
 | Option | Meaning |
 | --- | --- |
@@ -297,6 +505,17 @@ Examples:
 oralab logs --no-follow --tail 100
 oralab logs --since 10m --timestamps
 ```
+
+Running `oralab logs` without options follows the log stream. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to return to the terminal.
+
+### Resource Manager options
+
+These options belong to `oralab ui`:
+
+| Option | Explanation |
+| --- | --- |
+| `--port PORT` | Listen on a different loopback port instead of the default `8765`, for example `oralab ui --port 8877`. |
+| `--no-open` | Start the Resource Manager without automatically opening a browser. |
 
 ## Local Resource Manager
 
@@ -419,27 +638,6 @@ oralab status
 ```
 
 An explicit `--project-dir` takes precedence over `ORALAB_PROJECT_DIR`.
-
-## Common operations
-
-```sh
-# Show current state
-oralab status
-
-# Follow startup/runtime logs
-oralab logs
-
-# Stop gracefully while keeping the container and database volume
-oralab stop
-
-# Start the same container again
-oralab start
-
-# Restart with a longer shutdown timeout
-oralab restart --timeout 900
-```
-
-OraLab intentionally does not include a destructive cleanup command. Manually deleting `oralab-oradata` can permanently destroy the lab database.
 
 ## Troubleshooting
 

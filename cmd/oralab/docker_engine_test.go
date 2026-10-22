@@ -21,6 +21,7 @@ type fakeEngine struct {
 	statsErr       error
 	ensureImage    string
 	ensureImageErr error
+	imagePulled    bool
 	createSpec     engineContainerSpec
 	createErr      error
 	startCalls     int
@@ -48,9 +49,12 @@ func (f *fakeEngine) Info(context.Context) (engineInfo, error) {
 func (f *fakeEngine) InspectContainer(context.Context, string) (engineContainer, error) {
 	return f.container, f.inspectErr
 }
-func (f *fakeEngine) EnsureImage(_ context.Context, image string) error {
+func (f *fakeEngine) EnsureImage(_ context.Context, image string, report func(engineImageProgress)) (bool, error) {
 	f.ensureImage = image
-	return f.ensureImageErr
+	if report != nil && f.imagePulled {
+		report(engineImageProgress{ID: "layer-1234567890", Status: "Downloading", Current: 50, Total: 100})
+	}
+	return f.imagePulled, f.ensureImageErr
 }
 func (f *fakeEngine) CreateContainer(_ context.Context, spec engineContainerSpec) (string, error) {
 	f.createSpec = spec

@@ -250,34 +250,71 @@ func (a app) openEngine() (dockerEngine, bool) {
 	return engine, true
 }
 
+func (a app) openLifecycleEngine(ctx context.Context, progress *cliProgress) (dockerEngine, bool) {
+	progress.waiting("Connecting to the Docker Engine")
+	engine, err := a.newEngine()
+	if err != nil {
+		progress.failed("Docker Engine client could not be created")
+		fmt.Fprintf(a.stderr, "oralab: connect to Docker Engine API: %v\n", err)
+		return nil, false
+	}
+	if !isLocalDockerEndpoint(engine.Endpoint()) {
+		progress.failed("Docker Engine endpoint is not local")
+		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+		_ = engine.Close()
+		return nil, false
+	}
+	checkContext, cancel := context.WithTimeout(ctx, stateTimeout)
+	defer cancel()
+	info, err := engine.Info(checkContext)
+	if err != nil {
+		progress.failed("Docker Engine is unavailable")
+		fmt.Fprintf(a.stderr, "oralab: connect to Docker Engine API: %v\n", err)
+		_ = engine.Close()
+		return nil, false
+	}
+	if info.ServerVersion != "" {
+		progress.success("Docker Engine %s is available", info.ServerVersion)
+	} else {
+		progress.success("Docker Engine is available")
+	}
+	return engine, true
+}
+
 func (a app) up(root string, seconds int) int {
-	engine, ok := a.openEngine()
+	progress := newCLIProgress(a.stdout)
+	progress.heading()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
+	defer cancel()
+	engine, ok := a.openLifecycleEngine(ctx, progress)
 	if !ok {
 		return 1
 	}
 	defer engine.Close()
-	if !isLocalDockerEndpoint(engine.Endpoint()) {
-		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
-		return 1
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
-	defer cancel()
-	inspected, err := ensureOracleContainer(ctx, engine, root)
+	inspected, err := ensureOracleContainer(ctx, engine, root, progress)
 	if err != nil {
+		progress.failed("Oracle container preparation failed")
 		fmt.Fprintf(a.stderr, "oralab: prepare Oracle container: %v\n", err)
 		return 1
 	}
 	if !inspected.Running {
+		progress.waiting("Starting the Oracle container")
 		if err := engine.StartContainer(ctx, oracleContainerName); err != nil {
+			progress.failed("Oracle container could not be started")
 			fmt.Fprintf(a.stderr, "oralab: start Oracle container: %v\n", err)
 			return 1
 		}
+		progress.success("Oracle container started")
+	} else {
+		progress.success("Oracle container is already running")
 	}
-	if err := waitForReadiness(ctx, engine, oracleContainerName); err != nil {
+	progress.waiting("Waiting for Oracle readiness")
+	if err := waitForReadinessWithProgress(ctx, engine, oracleContainerName, progress.readinessUpdate); err != nil {
+		progress.failed("Oracle did not become ready")
 		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(a.stdout, "Oracle container is running and ready.")
+	progress.success("Oracle Database 19c is running and ready")
 	return 0
 }
 
@@ -314,9 +351,17 @@ func (a app) logs(options logOptions) int {
 	defer engine.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if options.Follow {
+		fmt.Fprintln(a.stderr, "[..] Following Oracle logs; press Ctrl+C to stop")
+	} else {
+		fmt.Fprintln(a.stderr, "[..] Reading Oracle logs")
+	}
 	if err := engine.Logs(ctx, oracleContainerName, options, a.stdout, a.stderr); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(a.stderr, "oralab: read Oracle logs: %v\n", err)
 		return 1
+	}
+	if !options.Follow {
+		fmt.Fprintln(a.stderr, "[OK] Oracle log read completed")
 	}
 	return 0
 }
@@ -342,78 +387,135 @@ func (a app) exec(command []string, tty bool) int {
 }
 
 func (a app) start() int {
-	engine, ok := a.openEngine()
+	progress := newCLIProgress(a.stdout)
+	progress.heading()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(defaultWait)*time.Second)
+	defer cancel()
+	engine, ok := a.openLifecycleEngine(ctx, progress)
 	if !ok {
 		return 1
 	}
 	defer engine.Close()
-	if !isLocalDockerEndpoint(engine.Endpoint()) {
-		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+	progress.waiting("Inspecting the Oracle container")
+	inspected, err := engine.InspectContainer(ctx, oracleContainerName)
+	if errors.Is(err, errDockerObjectNotFound) {
+		progress.failed("Oracle container has not been created")
+		fmt.Fprintln(a.stderr, "oralab: Oracle container does not exist; run oralab up first")
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(defaultWait)*time.Second)
-	defer cancel()
-	inspected, err := engine.InspectContainer(ctx, oracleContainerName)
 	if err != nil {
+		progress.failed("Oracle container inspection failed")
 		fmt.Fprintf(a.stderr, "oralab: inspect Oracle container: %v\n", err)
 		return 1
 	}
 	if !inspected.Managed {
+		progress.failed("The existing container is not managed by OraLab")
 		fmt.Fprintln(a.stderr, "oralab: the oralab-oracle container is not managed by OraLab")
 		return 1
 	}
+	progress.success("OraLab-managed Oracle container found")
 	if !inspected.Running {
+		progress.waiting("Starting the Oracle container")
 		if err := engine.StartContainer(ctx, oracleContainerName); err != nil {
+			progress.failed("Oracle container could not be started")
 			fmt.Fprintf(a.stderr, "oralab: start Oracle container: %v\n", err)
 			return 1
 		}
+		progress.success("Oracle container started")
+	} else {
+		progress.success("Oracle container is already running")
 	}
-	if err := waitForReadiness(ctx, engine, oracleContainerName); err != nil {
+	progress.waiting("Waiting for Oracle readiness")
+	if err := waitForReadinessWithProgress(ctx, engine, oracleContainerName, progress.readinessUpdate); err != nil {
+		progress.failed("Oracle did not become ready")
 		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
 		return 1
 	}
+	progress.success("Oracle Database 19c is running and ready")
 	return 0
 }
 
 func (a app) stop(seconds int) int {
-	engine, ok := a.openEngine()
+	progress := newCLIProgress(a.stdout)
+	progress.heading()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+60)*time.Second)
+	defer cancel()
+	engine, ok := a.openLifecycleEngine(ctx, progress)
 	if !ok {
 		return 1
 	}
 	defer engine.Close()
-	if !isLocalDockerEndpoint(engine.Endpoint()) {
-		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+	progress.waiting("Inspecting the Oracle container")
+	inspected, err := engine.InspectContainer(ctx, oracleContainerName)
+	if errors.Is(err, errDockerObjectNotFound) {
+		progress.success("Oracle container does not exist; nothing to stop")
+		return 0
+	}
+	if err != nil {
+		progress.failed("Oracle container inspection failed")
+		fmt.Fprintf(a.stderr, "oralab: inspect Oracle container: %v\n", err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+60)*time.Second)
-	defer cancel()
+	if !inspected.Managed {
+		progress.failed("The existing container is not managed by OraLab")
+		fmt.Fprintln(a.stderr, "oralab: the oralab-oracle container is not managed by OraLab")
+		return 1
+	}
+	if !inspected.Running {
+		progress.success("Oracle is already stopped; database files are preserved")
+		return 0
+	}
+	progress.waiting("Stopping Oracle gracefully")
 	if err := engine.StopContainer(ctx, oracleContainerName, seconds); err != nil {
+		progress.failed("Oracle container could not be stopped")
 		fmt.Fprintf(a.stderr, "oralab: stop Oracle container: %v\n", err)
 		return 1
 	}
+	progress.success("Oracle stopped; database files are preserved")
 	return 0
 }
 
 func (a app) restart(seconds int) int {
-	engine, ok := a.openEngine()
+	progress := newCLIProgress(a.stdout)
+	progress.heading()
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+	engine, ok := a.openLifecycleEngine(ctx, progress)
 	if !ok {
 		return 1
 	}
 	defer engine.Close()
-	if !isLocalDockerEndpoint(engine.Endpoint()) {
-		fmt.Fprintln(a.stderr, "oralab: refusing lifecycle changes through a remote Docker endpoint")
+	progress.waiting("Inspecting the Oracle container")
+	inspected, err := engine.InspectContainer(ctx, oracleContainerName)
+	if errors.Is(err, errDockerObjectNotFound) {
+		progress.failed("Oracle container has not been created")
+		fmt.Fprintln(a.stderr, "oralab: Oracle container does not exist; run oralab up first")
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
-	defer cancel()
+	if err != nil {
+		progress.failed("Oracle container inspection failed")
+		fmt.Fprintf(a.stderr, "oralab: inspect Oracle container: %v\n", err)
+		return 1
+	}
+	if !inspected.Managed {
+		progress.failed("The existing container is not managed by OraLab")
+		fmt.Fprintln(a.stderr, "oralab: the oralab-oracle container is not managed by OraLab")
+		return 1
+	}
+	progress.waiting("Restarting the Oracle container")
 	if err := engine.RestartContainer(ctx, oracleContainerName, seconds); err != nil {
+		progress.failed("Oracle container could not be restarted")
 		fmt.Fprintf(a.stderr, "oralab: restart Oracle container: %v\n", err)
 		return 1
 	}
-	if err := waitForReadiness(ctx, engine, oracleContainerName); err != nil {
+	progress.success("Oracle container restarted")
+	progress.waiting("Waiting for Oracle readiness")
+	if err := waitForReadinessWithProgress(ctx, engine, oracleContainerName, progress.readinessUpdate); err != nil {
+		progress.failed("Oracle did not become ready")
 		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
 		return 1
 	}
+	progress.success("Oracle Database 19c restarted and ready")
 	return 0
 }
 

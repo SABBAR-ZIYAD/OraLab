@@ -284,7 +284,7 @@ func (m *resourceManager) lifecycle(ctx context.Context, request lifecycleReques
 	var err error
 	switch request.Action {
 	case "start":
-		_, err = ensureOracleContainer(operationContext, m.engine, m.root)
+		_, err = ensureOracleContainer(operationContext, m.engine, m.root, nil)
 		if err == nil && !before.Oracle.Running {
 			err = m.engine.StartContainer(operationContext, oracleContainerName)
 		}
@@ -318,12 +318,13 @@ func (m *resourceManager) lifecycle(ctx context.Context, request lifecycleReques
 	return operationResult{OK: true, Applied: true, Message: "Oracle lifecycle operation completed and its state was verified.", State: after}
 }
 
-func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string) (engineContainer, error) {
+func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string, progress *cliProgress) (engineContainer, error) {
 	existing, err := engine.InspectContainer(ctx, oracleContainerName)
 	if err == nil {
 		if !existing.Managed {
 			return engineContainer{}, errors.New("a container named oralab-oracle exists but is not managed by OraLab")
 		}
+		progress.success("Existing OraLab container found")
 		return existing, nil
 	}
 	if !errors.Is(err, errDockerObjectNotFound) {
@@ -339,9 +340,17 @@ func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string
 	if config.CPUs <= 0 || config.MemoryBytes <= 0 {
 		return engineContainer{}, errors.New("ORACLE_CPUS and ORACLE_MEMORY must be configured before creating Oracle")
 	}
-	if err := engine.EnsureImage(ctx, defaultOracleImage); err != nil {
+	progress.waiting("Checking the Oracle Database 19c image")
+	pulled, err := engine.EnsureImage(ctx, defaultOracleImage, progress.imagePullUpdate)
+	if err != nil {
 		return engineContainer{}, oracleImagePullError(err)
 	}
+	if pulled {
+		progress.success("Oracle Database 19c image downloaded")
+	} else {
+		progress.success("Oracle Database 19c image already available")
+	}
+	progress.waiting("Creating the Oracle container and persistent storage")
 	_, err = engine.CreateContainer(ctx, engineContainerSpec{
 		Name: oracleContainerName, Image: defaultOracleImage,
 		Environment: []string{
@@ -358,6 +367,7 @@ func ensureOracleContainer(ctx context.Context, engine dockerEngine, root string
 	if err != nil {
 		return engineContainer{}, err
 	}
+	progress.success("Oracle container and persistent storage are ready")
 	return engine.InspectContainer(ctx, oracleContainerName)
 }
 
@@ -379,9 +389,21 @@ This is not required for every use. Once the image is downloaded, OraLab reuses 
 Authentication is needed again only if the image is removed, Docker data is reset, or a new image must be downloaded.`, defaultOracleImage, err, oracleRegistryURL)
 }
 
+type readinessProgress struct {
+	Status  string
+	Elapsed time.Duration
+}
+
 func waitForReadiness(ctx context.Context, engine dockerEngine, name string) error {
+	return waitForReadinessWithProgress(ctx, engine, name, nil)
+}
+
+func waitForReadinessWithProgress(ctx context.Context, engine dockerEngine, name string, report func(readinessProgress)) error {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	started := time.Now()
+	lastReport := time.Time{}
+	lastStatus := ""
 	for {
 		inspected, err := engine.InspectContainer(ctx, name)
 		if err != nil {
@@ -395,6 +417,12 @@ func waitForReadiness(ctx context.Context, engine dockerEngine, name string) err
 		}
 		if inspected.Health == "unhealthy" {
 			return errors.New("container healthcheck reports unhealthy")
+		}
+		now := time.Now()
+		if report != nil && (inspected.Health != lastStatus || lastReport.IsZero() || now.Sub(lastReport) >= 15*time.Second) {
+			report(readinessProgress{Status: inspected.Health, Elapsed: now.Sub(started)})
+			lastStatus = inspected.Health
+			lastReport = now
 		}
 		select {
 		case <-ctx.Done():

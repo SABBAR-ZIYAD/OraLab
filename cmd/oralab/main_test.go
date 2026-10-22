@@ -72,10 +72,11 @@ func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := &fakeEngine{
-		info:       engineInfo{CPUs: 8, MemoryBytes: 10 * 1024 * 1024 * 1024},
-		inspectErr: errDockerObjectNotFound,
+		info:        engineInfo{CPUs: 8, MemoryBytes: 10 * 1024 * 1024 * 1024},
+		inspectErr:  errDockerObjectNotFound,
+		imagePulled: true,
 	}
-	a, _, stderr := testApp(root, engine)
+	a, stdout, stderr := testApp(root, engine)
 
 	if code := a.run([]string{"up", "--timeout", "900"}); code != 0 {
 		t.Fatalf("exit code %d, stderr: %s", code, stderr.String())
@@ -96,6 +97,56 @@ func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 	}
 	if engine.startCalls != 1 {
 		t.Fatalf("start calls = %d", engine.startCalls)
+	}
+	for _, expected := range []string{
+		"Connecting to the Docker Engine",
+		"Pulling Oracle image: Downloading",
+		"Oracle Database 19c image downloaded",
+		"Oracle container and persistent storage are ready",
+		"Starting the Oracle container",
+		"Oracle Database 19c is running and ready",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Errorf("progress output is missing %q:\n%s", expected, stdout.String())
+		}
+	}
+}
+
+func TestLifecycleCommandsReportSafeOutcomes(t *testing.T) {
+	root := projectFixture(t)
+	engine := &fakeEngine{
+		container: engineContainer{
+			ID: "1234567890abcdef", Managed: true, Running: true, Status: "running",
+			HealthConfigured: true, Health: "healthy",
+		},
+	}
+	a, stdout, stderr := testApp(root, engine)
+
+	if code := a.run([]string{"start"}); code != 0 {
+		t.Fatalf("start exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Oracle container is already running") ||
+		!strings.Contains(stdout.String(), "Oracle Database 19c is running and ready") {
+		t.Fatalf("start progress output:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := a.run([]string{"stop"}); code != 0 {
+		t.Fatalf("stop exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Stopping Oracle gracefully") ||
+		!strings.Contains(stdout.String(), "database files are preserved") {
+		t.Fatalf("stop progress output:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := a.run([]string{"stop"}); code != 0 {
+		t.Fatalf("repeated stop exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already stopped") {
+		t.Fatalf("repeated stop output:\n%s", stdout.String())
 	}
 }
 

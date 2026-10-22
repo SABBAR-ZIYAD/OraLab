@@ -60,6 +60,13 @@ type engineStats struct {
 	MemoryUsedBytes int64
 }
 
+type engineImageProgress struct {
+	ID      string
+	Status  string
+	Current int64
+	Total   int64
+}
+
 type engineContainerSpec struct {
 	Name        string
 	Image       string
@@ -88,7 +95,7 @@ type dockerEngine interface {
 	Endpoint() string
 	Info(context.Context) (engineInfo, error)
 	InspectContainer(context.Context, string) (engineContainer, error)
-	EnsureImage(context.Context, string) error
+	EnsureImage(context.Context, string, func(engineImageProgress)) (bool, error)
 	CreateContainer(context.Context, engineContainerSpec) (string, error)
 	StartContainer(context.Context, string) error
 	StopContainer(context.Context, string, int) error
@@ -181,29 +188,41 @@ func (e *mobyEngine) InspectContainer(ctx context.Context, name string) (engineC
 	return details, nil
 }
 
-func (e *mobyEngine) EnsureImage(ctx context.Context, image string) error {
+func (e *mobyEngine) EnsureImage(ctx context.Context, image string, report func(engineImageProgress)) (bool, error) {
 	if _, err := e.client.ImageInspect(ctx, image); err == nil {
-		return nil
+		return false, nil
 	} else if !errdefs.IsNotFound(err) {
-		return err
+		return false, err
 	}
 	response, err := e.client.ImagePull(ctx, image, client.ImagePullOptions{RegistryAuth: e.registryAuth})
 	if err != nil {
-		return fmt.Errorf("pull image: %w", err)
+		return false, fmt.Errorf("pull image: %w", err)
 	}
 	defer response.Close()
 	decoder := json.NewDecoder(response)
 	for {
 		var event struct {
-			Error string `json:"error"`
+			ID             string `json:"id"`
+			Status         string `json:"status"`
+			Error          string `json:"error"`
+			ProgressDetail struct {
+				Current int64 `json:"current"`
+				Total   int64 `json:"total"`
+			} `json:"progressDetail"`
 		}
 		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
-			return nil
+			return true, nil
 		} else if err != nil {
-			return fmt.Errorf("read image pull response: %w", err)
+			return false, fmt.Errorf("read image pull response: %w", err)
 		}
 		if event.Error != "" {
-			return errors.New(event.Error)
+			return false, errors.New(event.Error)
+		}
+		if report != nil {
+			report(engineImageProgress{
+				ID: event.ID, Status: event.Status,
+				Current: event.ProgressDetail.Current, Total: event.ProgressDetail.Total,
+			})
 		}
 	}
 }

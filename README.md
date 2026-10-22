@@ -34,13 +34,77 @@ The Docker CLI, Docker Compose, and Go are **not** runtime requirements. Go 1.24
 
 ## Installation
 
+OraLab publishes the same application version as a separate executable for Windows, Linux, and macOS. The installation wizard lets you select your operating system with the arrow keys, downloads the matching latest release, verifies its SHA-256 checksum, installs it for your user account, and adds it to `PATH` when necessary.
+
+These builds currently target x86-64/AMD64 because OraLab's supported Oracle 19c image is published for `linux/amd64`.
+
+### Installation wizard (recommended)
+
+Clone the repository once, or pull the latest installer changes in an existing clone:
+
+```sh
+git clone https://github.com/SABBAR-ZIYAD/OraLab.git
+cd OraLab
+```
+
+If the repository is already present, update it instead:
+
+```sh
+git pull
+```
+
+Windows Command Prompt or PowerShell:
+
+```bat
+.\install.cmd
+```
+
+Linux or macOS:
+
+```sh
+bash ./install.sh
+```
+
+Use <kbd>↑</kbd>/<kbd>↓</kbd> to select your operating system and press <kbd>Enter</kbd>. The detected operating system is selected by default. The wizard refuses to install a binary for a different operating system or an unsupported CPU architecture.
+
+The wizard installs OraLab without administrator access:
+
+| Platform | Installation location |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\Programs\OraLab\oralab.exe` |
+| Linux | `~/.local/bin/oralab` |
+| macOS | `~/.local/bin/oralab` |
+
+Open a new terminal if the wizard updated `PATH`, then verify the installation:
+
+```sh
+oralab version
+```
+
+Continue with [Quick start](#quick-start) to create the lab configuration before running `oralab doctor`.
+
+For automated installation, skip the menu by passing the native operating system explicitly:
+
+```powershell
+.\install.cmd -OS windows
+```
+
+```sh
+bash ./install.sh --os linux
+bash ./install.sh --os darwin
+```
+
+The wizard installs the latest published GitHub release. It does not build the checked-out source and therefore does not require Go.
+
+### Manual installation
+
 Download the archive for your operating system from the [latest OraLab release](https://github.com/SABBAR-ZIYAD/OraLab/releases/latest):
 
 - `oralab_VERSION_windows_amd64.zip`
 - `oralab_VERSION_linux_amd64.tar.gz`
 - `oralab_VERSION_darwin_amd64.tar.gz`
 
-Extract the archive and optionally move the executable into a directory on your `PATH`. The executable contains the configuration template it needs, so users do not need to clone this repository. These builds currently target x86-64/AMD64 because OraLab's supported Oracle 19c image is published for `linux/amd64`.
+Extract the archive and move the executable into a directory on your `PATH`. The executable contains the configuration template it needs, so users do not need to keep the cloned repository after installation.
 
 ### Build from source
 
@@ -130,6 +194,26 @@ OraLab will:
 4. Create the managed `oralab-oracle` container when needed.
 5. Publish Oracle port `1521` on `127.0.0.1` only.
 6. Start the container and wait for its image healthcheck. If the image has no healthcheck, OraLab treats a running container as ready.
+
+Long-running commands report each real stage in the terminal. Image download events are throttled to remain readable, and readiness messages include elapsed time instead of displaying fake percentages. A first startup looks like:
+
+```text
+OraLab - Oracle Database 19c
+
+[OK] Docker Engine is available
+[..] Checking the Oracle Database 19c image
+[..] Pulling Oracle image: Downloading [layer-id] (42%)
+[OK] Oracle Database 19c image downloaded
+[..] Creating the Oracle container and persistent storage
+[OK] Oracle container and persistent storage are ready
+[..] Starting the Oracle container
+[OK] Oracle container started
+[..] Waiting for Oracle readiness
+[..] Oracle is starting (elapsed 30s)
+[OK] Oracle Database 19c is running and ready
+```
+
+OraLab reports cached images, existing containers, already-running or already-stopped states, failures, and successful completion accurately. `stop` also confirms that the persistent database files were preserved.
 
 The first Oracle initialization can take several minutes. The default startup timeout is 1,800 seconds:
 

@@ -7,3 +7,6 @@ import _ "embed"
 //
 //go:embed env.example
 var embeddedEnvironmentSample []byte
+
+//go:embed compose.yaml
+var embeddedComposeFile []byte

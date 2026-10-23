@@ -28,7 +28,7 @@ var webAssets embed.FS
 
 type managerOperations interface {
 	state(context.Context) managerState
-	apply(context.Context, applyRequest) operationResult
+	logs(context.Context) (string, error)
 	lifecycle(context.Context, lifecycleRequest) operationResult
 }
 
@@ -55,11 +55,7 @@ func (a app) ui(root string, args []string) int {
 		fmt.Fprintf(a.stderr, "oralab: load UI assets: %v\n", err)
 		return 1
 	}
-	engine, engineErr := a.newEngine()
-	if engine != nil {
-		defer engine.Close()
-	}
-	manager := newResourceManager(root, engine, engineErr)
+	manager := newComposeManager(a, root)
 	handler := &uiHandler{
 		manager: manager,
 		csrf:    csrf,
@@ -83,7 +79,7 @@ func (a app) ui(root string, args []string) int {
 		MaxHeaderBytes:    16 * 1024,
 	}
 
-	fmt.Fprintf(a.stdout, "OraLab Resource Manager: %s\n", address)
+	fmt.Fprintf(a.stdout, "OraLab Manager: %s\n", address)
 	fmt.Fprintln(a.stdout, "The service is bound to this computer only. Press Ctrl+C to stop it.")
 	if openBrowser {
 		if err := launchBrowser(address); err != nil {
@@ -97,6 +93,33 @@ func (a app) ui(root string, args []string) int {
 	go func() {
 		serveError <- server.Serve(listener)
 	}()
+	oracleStopped := make(chan struct{}, 1)
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		observedRunning := false
+		for range ticker.C {
+			stateContext, cancel := context.WithTimeout(context.Background(), stateTimeout)
+			service, exists, err := manager.app.composeServiceState(stateContext, manager.root)
+			cancel()
+			if err != nil {
+				continue
+			}
+			running := exists && service.State == "running"
+			if running {
+				observedRunning = true
+			}
+			if observedRunning && !manager.busy.Load() && exists && !running {
+				oracleStopped <- struct{}{}
+				return
+			}
+		}
+	}()
+	shutdown := func() error {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownContext)
+	}
 	select {
 	case err := <-serveError:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -104,10 +127,13 @@ func (a app) ui(root string, args []string) int {
 			return 1
 		}
 	case <-stopContext.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
+		if err := shutdown(); err != nil {
 			fmt.Fprintf(a.stderr, "oralab: UI shutdown failed: %v\n", err)
+			return 1
+		}
+	case <-oracleStopped:
+		if err := shutdown(); err != nil {
+			fmt.Fprintf(a.stderr, "oralab: UI shutdown after Oracle stop failed: %v\n", err)
 			return 1
 		}
 	}
@@ -131,20 +157,15 @@ func (h *uiHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		stateContext, cancel := context.WithTimeout(request.Context(), stateTimeout)
 		defer cancel()
 		h.writeJSON(writer, http.StatusOK, h.manager.state(stateContext))
-	case request.Method == http.MethodPost && request.URL.Path == "/api/apply":
-		if !h.authorizeMutation(writer, request) {
+	case request.Method == http.MethodGet && request.URL.Path == "/api/logs":
+		logContext, cancel := context.WithTimeout(request.Context(), stateTimeout)
+		defer cancel()
+		contents, err := h.manager.logs(logContext)
+		if err != nil {
+			h.writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}
-		var payload applyRequest
-		if !decodeJSON(writer, request, &payload) {
-			return
-		}
-		result := h.manager.apply(request.Context(), payload)
-		status := http.StatusOK
-		if !result.OK {
-			status = http.StatusBadRequest
-		}
-		h.writeJSON(writer, status, result)
+		h.writeJSON(writer, http.StatusOK, map[string]string{"logs": contents})
 	case request.Method == http.MethodPost && request.URL.Path == "/api/lifecycle":
 		if !h.authorizeMutation(writer, request) {
 			return
@@ -222,6 +243,7 @@ func (h *uiHandler) validOrigin(value string) bool {
 }
 
 func (h *uiHandler) setSecurityHeaders(writer http.ResponseWriter) {
+	writer.Header().Set("X-OraLab-Manager", "2")
 	writer.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")

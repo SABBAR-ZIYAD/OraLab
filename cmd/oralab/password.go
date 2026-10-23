@@ -7,6 +7,10 @@ import (
 	"os"
 )
 
+func terminalAttached(stdin, stdout *os.File) bool {
+	return term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd()))
+}
+
 func readPasswordFromTerminal() (string, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return "", errors.New("a terminal is required; pipe the password with --password-stdin for automation")

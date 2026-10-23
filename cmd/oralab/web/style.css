@@ -113,6 +113,9 @@ dd { margin: 0; font-size: .95rem; font-weight: 700; overflow-wrap: anywhere; }
 
 .lifecycle-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
 .two-column { display: grid; grid-template-columns: 1.12fr .88fr; gap: 20px; }
+.two-column + .panel { margin-top: 20px; }
+.two-column .environment-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.two-column .environment-grid .wide { grid-column: 1 / -1; border-right: 0; }
 
 .primary-button, .secondary-button, .quiet-button {
   border-radius: 8px;
@@ -149,6 +152,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 footer { padding: 26px 4px 0; color: var(--muted); font-size: .82rem; text-align: center; }
 code { padding: 2px 5px; border-radius: 4px; background: #e7e1d6; color: #4f4942; }
+pre { max-height: 360px; margin: 0; overflow: auto; padding: 16px; border-radius: 9px; background: #201f1c; color: #f5f0e7; font: .78rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+a { color: var(--accent-dark); }
 
 @media (max-width: 780px) {
   .shell { width: min(100% - 24px, 680px); padding-top: 28px; }

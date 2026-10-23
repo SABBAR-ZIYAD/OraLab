@@ -42,6 +42,13 @@ jobs:
           go test ./...
           go vet ./...
 
+      - name: Validate Compose manifest
+        env:
+          ORACLE_PWD: SmokeOnlyPassword1
+          ORACLE_SID: ORCLCDB
+          ORACLE_PDB: ORCLPDB1
+        run: docker compose -f compose.yaml config --quiet
+
       - name: Validate installer scripts
         shell: pwsh
         run: |

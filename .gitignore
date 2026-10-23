@@ -6,6 +6,12 @@
 /oralab
 /oralab.exe
 
+# Per-lab metadata created by OraLab. It records the last image used with the
+# persistent volume and must not be shared with the repository.
+.oralab-state
+.gocache/
+.tmp-build/
+
 # Oracle installation media, archives and local data
 *.zip
 *.tar

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Unit tests and static analysis
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Validate Compose manifest
+        env:
+          ORACLE_PWD: SmokeOnlyPassword1
+          ORACLE_SID: ORCLCDB
+          ORACLE_PDB: ORCLPDB1
+        run: docker compose -f compose.yaml config --quiet
+      - name: Cross-platform builds
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/oralab.exe ./cmd/oralab
+          GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/oralab-linux ./cmd/oralab
+          GOOS=darwin GOARCH=amd64 go build -trimpath -o /tmp/oralab-darwin ./cmd/oralab

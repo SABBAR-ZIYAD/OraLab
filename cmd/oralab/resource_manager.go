@@ -298,7 +298,7 @@ func (m *resourceManager) lifecycle(ctx context.Context, request lifecycleReques
 		err = m.engine.StopContainer(operationContext, oracleContainerName, defaultStop)
 	case "restart":
 		if !before.Oracle.Exists {
-			return operationResult{Message: "The Oracle container has not been created; use start first.", State: before}
+			return operationResult{Message: "The Oracle container has not been created; use up first.", State: before}
 		}
 		err = m.engine.RestartContainer(operationContext, oracleContainerName, defaultStop)
 		if err == nil {

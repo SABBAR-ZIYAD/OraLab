@@ -69,6 +69,9 @@ func (a app) run(args []string) int {
 		return 0
 	}
 	if command == "init" || command == "setup" {
+		if command == "setup" {
+			fmt.Fprintln(a.stderr, "oralab: \"setup\" is deprecated; use \"init\"")
+		}
 		root, err := a.resolveInitDir(projectDir)
 		if err != nil {
 			fmt.Fprintf(a.stderr, "oralab: %v\n", err)
@@ -127,7 +130,8 @@ func (a app) run(args []string) int {
 			fmt.Fprintln(a.stderr, "usage: oralab start")
 			return 2
 		}
-		return a.start()
+		fmt.Fprintln(a.stderr, "oralab: \"start\" is deprecated; use \"up\"")
+		return a.up(root, defaultWait)
 	case "stop":
 		seconds, ok := parseTimeout(commandArgs, defaultStop)
 		if !ok {
@@ -141,6 +145,7 @@ func (a app) run(args []string) int {
 			fmt.Fprintln(a.stderr, "usage: oralab restart [--timeout SECONDS]")
 			return 2
 		}
+		fmt.Fprintln(a.stderr, "oralab: \"restart\" is deprecated; use \"stop\" followed by \"up\"")
 		return a.restart(seconds)
 	default:
 		fmt.Fprintf(a.stderr, "oralab: unknown command %q\n\n", command)
@@ -384,55 +389,6 @@ func (a app) exec(command []string, tty bool) int {
 		return 1
 	}
 	return exitCode
-}
-
-func (a app) start() int {
-	progress := newCLIProgress(a.stdout)
-	progress.heading()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(defaultWait)*time.Second)
-	defer cancel()
-	engine, ok := a.openLifecycleEngine(ctx, progress)
-	if !ok {
-		return 1
-	}
-	defer engine.Close()
-	progress.waiting("Inspecting the Oracle container")
-	inspected, err := engine.InspectContainer(ctx, oracleContainerName)
-	if errors.Is(err, errDockerObjectNotFound) {
-		progress.failed("Oracle container has not been created")
-		fmt.Fprintln(a.stderr, "oralab: Oracle container does not exist; run oralab up first")
-		return 1
-	}
-	if err != nil {
-		progress.failed("Oracle container inspection failed")
-		fmt.Fprintf(a.stderr, "oralab: inspect Oracle container: %v\n", err)
-		return 1
-	}
-	if !inspected.Managed {
-		progress.failed("The existing container is not managed by OraLab")
-		fmt.Fprintln(a.stderr, "oralab: the oralab-oracle container is not managed by OraLab")
-		return 1
-	}
-	progress.success("OraLab-managed Oracle container found")
-	if !inspected.Running {
-		progress.waiting("Starting the Oracle container")
-		if err := engine.StartContainer(ctx, oracleContainerName); err != nil {
-			progress.failed("Oracle container could not be started")
-			fmt.Fprintf(a.stderr, "oralab: start Oracle container: %v\n", err)
-			return 1
-		}
-		progress.success("Oracle container started")
-	} else {
-		progress.success("Oracle container is already running")
-	}
-	progress.waiting("Waiting for Oracle readiness")
-	if err := waitForReadinessWithProgress(ctx, engine, oracleContainerName, progress.readinessUpdate); err != nil {
-		progress.failed("Oracle did not become ready")
-		fmt.Fprintf(a.stderr, "oralab: Oracle did not become ready: %v\n", err)
-		return 1
-	}
-	progress.success("Oracle Database 19c is running and ready")
-	return 0
 }
 
 func (a app) stop(seconds int) int {
@@ -786,19 +742,17 @@ Usage:
   oralab [--project-dir PATH] <command>
 
 Commands:
-  doctor                     Check Docker Engine and project configuration
   init --cpus N --memory S --shm S [--password-stdin]
                               Configure this lab and securely collect its database password
-  ui [--port PORT] [--no-open]
-                              Open the local CPU/RAM resource manager
   up [--timeout SECONDS]     Create/start Oracle and wait for readiness
   status                     Show Docker and Oracle container status
+  stop [--timeout SECONDS]   Gracefully stop Oracle (default: 600 seconds)
   logs [OPTIONS]             Follow Oracle logs through the Engine API
   shell                      Enter the Oracle container shell
   exec -- COMMAND [ARGS...]  Run a native command unchanged in the container
-  start                      Start the existing Oracle container
-  stop [--timeout SECONDS]   Gracefully stop Oracle (default: 600 seconds)
-  restart [--timeout SECONDS] Restart Oracle gracefully
+  ui [--port PORT] [--no-open]
+                              Open the local CPU/RAM resource manager
+  doctor                     Check Docker Engine and project configuration
   version                    Show the OraLab version
   help                       Show this help
 

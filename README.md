@@ -269,7 +269,7 @@ The first image download and database initialization can take several minutes. T
 oralab up --timeout 2400
 ```
 
-After the image has been downloaded, normal `start` and `stop` operations do not need registry credentials. Clear the temporary values when the first startup finishes.
+After the image has been downloaded, normal `up` and `stop` operations do not need registry credentials. Clear the temporary values when the first startup finishes.
 
 Windows Command Prompt:
 
@@ -356,7 +356,7 @@ Run OraLab commands from the lab directory containing `.env`, or use `--project-
 
 ```sh
 oralab status
-oralab start
+oralab up
 oralab shell
 ```
 
@@ -366,7 +366,7 @@ Inside the container, connect to the default pluggable database:
 sqlplus labuser@ORCLPDB1
 ```
 
-If `status` already reports that Oracle is running and ready, you do not need to run `start` again.
+If `status` already reports that Oracle is running and ready, you do not need to run `up` again.
 
 ### Stop a work session
 
@@ -446,9 +446,7 @@ oralab [--project-dir PATH] <command>
 | `oralab logs [OPTIONS]` | Read or follow Oracle container logs. |
 | `oralab shell` | Open an interactive Bash shell in the Oracle container. |
 | `oralab exec -- COMMAND [ARGS...]` | Run a command inside the container without changing its arguments. |
-| `oralab start` | Start the existing Oracle container. |
 | `oralab stop [--timeout SECONDS]` | Gracefully stop Oracle. Default: 600 seconds. |
-| `oralab restart [--timeout SECONDS]` | Gracefully restart Oracle. Default: 600 seconds. |
 | `oralab ui [--port PORT] [--no-open]` | Start the localhost Resource Manager. |
 | `oralab version` | Print the OraLab version. |
 | `oralab help` | Print command-line help. |
@@ -476,17 +474,25 @@ These options belong to `oralab init`:
 | --- | --- |
 | `oralab up --timeout SECONDS` | Create or start the container and wait up to this many seconds for Oracle readiness. The default is 1,800 seconds. |
 | `oralab stop --timeout SECONDS` | Give Oracle up to this many seconds to stop gracefully. The default is 600 seconds. |
-| `oralab restart --timeout SECONDS` | Use this shutdown timeout while gracefully restarting Oracle. The default is 600 seconds. |
 
 Examples:
 
 ```sh
 oralab up --timeout 2400
 oralab stop --timeout 900
-oralab restart --timeout 900
 ```
 
-`oralab start` has no options. It starts an existing container and waits for Oracle readiness. Use `oralab up` for the first run because `up` can also download the image and create the container and volume.
+`oralab up` is the single command for first-time setup and later starts. It downloads the image when needed, creates the container and volume when needed, starts Oracle, and waits for readiness.
+
+### Deprecated compatibility aliases
+
+Existing scripts can continue to use the following aliases, but new documentation and scripts should use the preferred commands instead:
+
+| Deprecated command | Preferred command |
+| --- | --- |
+| `oralab setup ...` | `oralab init ...` |
+| `oralab start` | `oralab up` |
+| `oralab restart [--timeout SECONDS]` | `oralab stop [--timeout SECONDS]`, then `oralab up` |
 
 ### Log options
 

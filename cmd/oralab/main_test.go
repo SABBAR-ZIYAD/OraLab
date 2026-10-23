@@ -114,6 +114,10 @@ func TestUpCreatesContainerThroughEngineAPI(t *testing.T) {
 
 func TestLifecycleCommandsReportSafeOutcomes(t *testing.T) {
 	root := projectFixture(t)
+	contents := "ORACLE_PWD=secret\nORACLE_CPUS=4\nORACLE_MEMORY=6g\nORACLE_SHM_SIZE=1g\n"
+	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	engine := &fakeEngine{
 		container: engineContainer{
 			ID: "1234567890abcdef", Managed: true, Running: true, Status: "running",
@@ -122,12 +126,12 @@ func TestLifecycleCommandsReportSafeOutcomes(t *testing.T) {
 	}
 	a, stdout, stderr := testApp(root, engine)
 
-	if code := a.run([]string{"start"}); code != 0 {
-		t.Fatalf("start exit code %d, stderr: %s", code, stderr.String())
+	if code := a.run([]string{"up"}); code != 0 {
+		t.Fatalf("up exit code %d, stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Oracle container is already running") ||
 		!strings.Contains(stdout.String(), "Oracle Database 19c is running and ready") {
-		t.Fatalf("start progress output:\n%s", stdout.String())
+		t.Fatalf("up progress output:\n%s", stdout.String())
 	}
 
 	stdout.Reset()
@@ -147,6 +151,36 @@ func TestLifecycleCommandsReportSafeOutcomes(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "already stopped") {
 		t.Fatalf("repeated stop output:\n%s", stdout.String())
+	}
+}
+
+func TestDeprecatedAliasesRemainAvailable(t *testing.T) {
+	root := projectFixture(t)
+	contents := "ORACLE_PWD=secret\nORACLE_CPUS=4\nORACLE_MEMORY=6g\nORACLE_SHM_SIZE=1g\n"
+	if err := os.WriteFile(filepath.Join(root, environmentFile), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeEngine{
+		container: engineContainer{
+			ID: "1234567890abcdef", Managed: true, Running: true, Status: "running",
+			HealthConfigured: true, Health: "healthy",
+		},
+	}
+	a, _, stderr := testApp(root, engine)
+
+	if code := a.run([]string{"start"}); code != 0 {
+		t.Fatalf("start alias exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"start" is deprecated; use "up"`) {
+		t.Fatalf("start deprecation warning = %q", stderr.String())
+	}
+
+	stderr.Reset()
+	if code := a.run([]string{"restart"}); code != 0 {
+		t.Fatalf("restart alias exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"restart" is deprecated; use "stop" followed by "up"`) {
+		t.Fatalf("restart deprecation warning = %q", stderr.String())
 	}
 }
 
@@ -239,6 +273,21 @@ func TestInitInitializesEmptyDirectoryFromEmbeddedSample(t *testing.T) {
 	}
 	if !isProjectDirectory(root) {
 		t.Fatal("standalone setup did not create an OraLab project directory")
+	}
+}
+
+func TestSetupAliasInitializesProjectWithDeprecationWarning(t *testing.T) {
+	root := t.TempDir()
+	a, _, stderr := testApp(root, &fakeEngine{})
+
+	if code := a.run([]string{"setup", "--cpus", "4", "--memory", "6g", "--shm", "1g"}); code != 0 {
+		t.Fatalf("setup alias exit code %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"setup" is deprecated; use "init"`) {
+		t.Fatalf("setup deprecation warning = %q", stderr.String())
+	}
+	if !isProjectDirectory(root) {
+		t.Fatal("setup alias did not create an OraLab project directory")
 	}
 }
 
